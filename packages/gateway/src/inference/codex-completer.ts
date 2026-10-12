@@ -33,6 +33,22 @@ export class CodexCompleter implements CompleteCapability {
   }
 
   async completeWithUsage(prompt: string, opts?: CodexCompletionOptions): Promise<HttpCompletion> {
+    return this.runCompletion(prompt, opts, false);
+  }
+
+  /** Verifier lifecycle lease: settle only after this call's iterator cleanup. */
+  async completeWithUsageSettled(
+    prompt: string,
+    opts?: CodexCompletionOptions,
+  ): Promise<HttpCompletion> {
+    return this.runCompletion(prompt, opts, true);
+  }
+
+  private async runCompletion(
+    prompt: string,
+    opts: CodexCompletionOptions | undefined,
+    awaitSettlement: boolean,
+  ): Promise<HttpCompletion> {
     if (this.disposed) throw new Error("Codex completer is disposed");
     opts?.signal?.throwIfAborted();
     const controller = new AbortController();
@@ -46,10 +62,12 @@ export class CodexCompleter implements CompleteCapability {
     let rejectAbort: (() => void) | undefined;
     const aborted = new Promise<never>((_resolve, reject) => {
       rejectAbort = () => reject(controller.signal.reason);
-      controller.signal.addEventListener("abort", rejectAbort, { once: true });
+      if (!awaitSettlement)
+        controller.signal.addEventListener("abort", rejectAbort, { once: true });
     });
     try {
-      return await Promise.race([this.consume(prompt, opts, controller.signal), aborted]);
+      const consuming = this.consume(prompt, opts, controller.signal);
+      return await (awaitSettlement ? consuming : Promise.race([consuming, aborted]));
     } finally {
       clearTimeout(timeout);
       opts?.signal?.removeEventListener("abort", cancel);
@@ -100,7 +118,16 @@ export class CodexCompleter implements CompleteCapability {
         ? {
             // The backend reports fresh and cached input apart; a completion's
             // prompt count is all input it consumed, as other completers report.
-            promptTokens: (terminal.usage.inputTokens ?? 0) + (terminal.usage.cacheReadTokens ?? 0),
+            promptTokens:
+              (terminal.usage.inputTokens ?? 0) +
+              (terminal.usage.cacheReadTokens ?? 0) +
+              (terminal.usage.cacheCreationTokens ?? 0),
+            ...(terminal.usage.cacheReadTokens !== undefined
+              ? { cacheReadTokens: terminal.usage.cacheReadTokens }
+              : {}),
+            ...(terminal.usage.cacheCreationTokens !== undefined
+              ? { cacheCreationTokens: terminal.usage.cacheCreationTokens }
+              : {}),
             completionTokens: terminal.usage.outputTokens ?? 0,
           }
         : null,
