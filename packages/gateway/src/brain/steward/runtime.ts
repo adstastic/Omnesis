@@ -29,6 +29,19 @@
 
 import { buildBuiltinTools, PlanStore, type ToolHandle, type ToolPorts } from "@omnesis/agent";
 import { experimentalVisible, type EntailCapability, type Logger } from "@omnesis/core";
+import {
+  parseCognitionSynthesisRunPayload,
+  parseCognitionDataRunPayload,
+  parseCognitionBootstrapRunPayload,
+  parseCognitionDigestRunPayload,
+  parseCognitionMergeAdjudicationRunPayload,
+  runScopeLoopId,
+} from "../run-payloads.js";
+import { buildKnowledgeTools } from "../knowledge/tools.js";
+import { isKnowledgeEvidenceReadable } from "../knowledge/storage-source-fence.js";
+import { withKnowledgeSourceReadReceipts } from "../knowledge/source-read-receipts.js";
+import { isParallelKnowledgeRun } from "../storage/run-queue.js";
+import { buildMaintenanceCanonicalTools } from "../knowledge/canonical-tool-fence.js";
 import { isGrantedMutation } from "../cognition/authority.js";
 import { cognitiveWorkflowIdForRun } from "../cognition/workflows.js";
 
@@ -39,26 +52,17 @@ import { createGatewayEntityContextPort } from "../../domain/cognitive-graph/int
 import { readCognitionNotes } from "../storage/notes.js";
 import { resolveSelfMemory } from "../self-memory.js";
 import { fetchSelfPersonId } from "../../domain/InteractionScoreService.js";
-import {
-  parseCognitionDataRunPayload,
-  parseCognitionBootstrapRunPayload,
-  parseCognitionDigestRunPayload,
-  parseCognitionMergeAdjudicationRunPayload,
-  parseCognitionSweepRunPayload,
-  runScopeLoopId,
-  cognitionBriefLane,
-  type CognitionBriefLane,
-} from "../run-payloads.js";
 import { buildMergeAdjudicationTool } from "../merge-adjudication.js";
 import { currentEvidenceFingerprint, getMergeCandidateById } from "../../merge-candidates.js";
 import { getOpenLoop } from "../storage/open-loops.js";
 import { systemClock, type ClaimedCognitionRun, type Clock } from "../storage/types.js";
 import { resolveAddressedEntries } from "../addressed-entry-context.js";
-import { loadDigestHorizon, localTimeZone } from "./digest-horizon.js";
-import {
-  loadNearbyTimelineContext,
-  type NearbyTimelineContext,
-} from "./nearby-timeline-context.js";
+import { renderKnowledgeRootContext } from "../knowledge/root-context.js";
+import { recheckObservations } from "../observations/recheck.js";
+import { buildMorningBriefSendTool } from "../observations/morning-brief.js";
+import { morningBriefSent } from "../storage/morning-brief-items.js";
+import { readDigestInputs } from "./digest-inputs.js";
+import { PersonProfileReads } from "./person-profile-reads.js";
 import {
   buildCognitionOwnTools,
   COGNITION_MUTATING_TOOL_NAMES,
@@ -66,11 +70,24 @@ import {
   type CognitionToolDeps,
   type CognitionWriteOps,
 } from "./tools.js";
-import { buildCognitionRunPrompt, buildCognitionSystemPrompt } from "./prompts.js";
+import {
+  loadNearbyTimelineContext,
+  type NearbyTimelineContext,
+} from "./nearby-timeline-context.js";
+import { loadDigestHorizon, localTimeZone } from "./digest-horizon.js";
+import {
+  buildCognitionRunPrompt,
+  buildCognitionSystemPrompt,
+  buildCognitionWorkflowInstructions,
+} from "./prompts.js";
 import { RunConsumptionTracker } from "./consumption.js";
 import { createOpenLoopMirror, type OpenLoopMirror } from "./mirror.js";
+import type { KnowledgeEngine } from "../knowledge/engine.js";
+import type { KnowledgeService } from "../knowledge/service.js";
 import type { PersonLookupGate } from "../../domain/person-lookup.js";
-import type { BriefJudge } from "./brief-judge.js";
+import type { ObservationScoringInput, ObservationScoringResult } from "../observations/noting.js";
+import type { MorningBriefSenderDeps } from "../observations/morning-brief.js";
+import type { ObservationRecheckDeps } from "../observations/recheck.js";
 import type Database from "better-sqlite3";
 import type { AnalyticsDb } from "../../analytics-db.js";
 import type { SearchPipeline } from "../../search/pipeline.js";
@@ -83,13 +100,16 @@ import type { RecordCheck } from "../record-check/check.js";
 
 type Db = Database.Database;
 
-/** The run driver's three injectable seams, filled. */
+/** Injectable run-driver seams backed by the cognition runtime. */
 export interface CognitionRuntime {
   buildTools: (run: ClaimedCognitionRun, context?: CognitionRunExecutionContext) => ToolHandle[];
+  preflight?: (run: ClaimedCognitionRun) => Promise<"complete" | "continue" | "defer">;
+  /** A completed run that left required work undone fails with this reason and retries. */
+  validateRun?: (run: ClaimedCognitionRun) => Promise<string | null>;
   promptBuilder: (run: ClaimedCognitionRun) => string | Promise<string>;
-  systemPrompt: () => string;
+  systemPrompt: (run?: ClaimedCognitionRun) => string;
   /**
-   * Build ONLY the Cognition Steward's own mutating tools (open loops, briefs, notes,
+   * Build ONLY the Cognition Steward's own mutating tools (open loops, observations, notes,
    * schedule, annotate, temporal annotation), stamped with `runId` as their
    * `created_by_run`. The top-level interactive agent augments its read
    * registry with these so user-provided facts can be written straight into the
@@ -128,6 +148,7 @@ export const COGNITION_INTERACTIVE_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 export interface CognitionToolsetDeps {
+  personProfileReads?: PersonProfileReads;
   db: Db;
   writeGate: CognitionWriteOps;
   /**
@@ -167,6 +188,7 @@ export interface CognitionToolsetDeps {
     confidenceCeiling: number;
     basisCeilings: { quoted: number; inferred: number; synthesized: number };
     confidenceFloor: number;
+    personProfileBudget?: { maxFacts: number; maxCharacters: number };
   };
   /**
    * Resolve the entailment verifier for the annotation firewall (fresh per
@@ -174,7 +196,7 @@ export interface CognitionToolsetDeps {
    * Omitted, or resolving to null (role unset), the gate is absent and
    * annotation writes are unchanged.
    */
-  getEntailmentVerifier?: () => Promise<EntailCapability | null>;
+  getEntailmentVerifier?: (signal?: AbortSignal) => Promise<EntailCapability | null>;
   validateAnnotationEvidence?: AnnotationToolDeps["validateAnnotationEvidence"];
   /**
    * The record check, bound per background run to the lanes it covers.
@@ -182,18 +204,20 @@ export interface CognitionToolsetDeps {
    */
   recordCheck?: RecordCheck;
   /**
-   * Resolve the brief judge (the push bar) for `brief_create`. Omitted, or
-   * resolving to null (judge disabled), the gate is absent and briefs ship
-   * unjudged.
+   * Scores a new observation for one run (decision model + "would have
+   * pushed"). Omitted (no decision model, unit tests) observations are
+   * stored unscored.
    */
-  getBriefJudge?: () => BriefJudge | null;
+  createObservationScorer?: (
+    runId: string,
+  ) => (input: ObservationScoringInput) => Promise<ObservationScoringResult>;
 }
 
 /**
  * The documents a run reconciles from — its `seedDocIds`. A `data` run seeds
  * from its datum; a loop-scoped check (decay or a `time_based` tied to a
  * loop) seeds from that loop's documents so it re-reconciles the loop's
- * neighbourhood. Every other run kind has no single datum focus → no seeds,
+ * neighbourhood. Maintenance uses its bounded current source work; other kinds have no seeds,
  * and `open_loop_search` stays lexical + semantic.
  */
 function cognitionSeedDocIds(db: Db, run: ClaimedCognitionRun): string[] {
@@ -201,6 +225,27 @@ function cognitionSeedDocIds(db: Db, run: ClaimedCognitionRun): string[] {
   if (data) return [data.docId];
   const boot = parseCognitionBootstrapRunPayload(run.payload);
   if (boot) return [boot.docId];
+  const maintenance = parseCognitionSynthesisRunPayload(run.payload);
+  if (maintenance?.focus === "knowledge-maintenance" && maintenance.batchId) {
+    // Current run-owned source work only: no corpus-wide or another batch's
+    // neighborhood. Recomputed by the tool dependency getter before each read.
+    return db.transaction(() =>
+      db
+        .prepare<[string, string], { id: string }>(
+          `
+      SELECT DISTINCT d.id FROM knowledge_batches b
+      JOIN knowledge_work w ON w.batch_id=b.id AND w.subject_kind='source'
+      JOIN documents d ON d.id=w.subject_id AND d.content_hash=w.input_revision
+      WHERE b.id=? AND b.run_id=? AND b.status IN ('pending','running')
+      AND NOT EXISTS (SELECT 1 FROM knowledge_cascade_jobs j WHERE j.kind='purge'
+        AND j.target_kind='source' AND j.target_id=d.id)
+      ORDER BY d.id LIMIT 32`,
+        )
+        .all(maintenance.batchId!, run.id)
+        .filter((row) => isKnowledgeEvidenceReadable(db, row.id))
+        .map((row) => row.id),
+    )();
+  }
   const loopId = runScopeLoopId(run.payload);
   if (loopId !== undefined) {
     const loop = getOpenLoop(db, loopId);
@@ -231,21 +276,18 @@ export function buildCognitionToolset(
   // The loop this run is itself scoped to (a loop-scoped time_based / decay
   // check), so `schedule_agent_run` can auto-attach it to a follow-up check.
   const triggeringLoopId = runScopeLoopId(run.payload);
-  const sweepId = parseCognitionSweepRunPayload(run.payload)?.sweepId;
-  const checkRecord = deps.recordCheck?.forRun(run) ?? null;
+  const checkRecord = deps.recordCheck?.forRun(run, { autonomousWithdrawals: true }) ?? null;
   const own = buildCognitionOwnTools({
     ...ownToolsInput(deps, {
       runId: run.id,
-      seedDocIds: cognitionSeedDocIds(deps.db, run),
-      briefLane: cognitionBriefLane(run),
-      // Present only on a sweep run: what the judge held is the one production
-      // number that cannot be recovered from `created_by_run` afterwards, so
-      // the tool records it against the sweep as it happens.
-      ...(sweepId !== undefined ? { sweepId } : {}),
+      seedDocIds: [],
       ...(triggeringLoopId !== undefined ? { triggeringLoopId } : {}),
       ...(opts.consumption ? { consumption: opts.consumption } : {}),
     }),
     ...(checkRecord ? { checkRecord } : {}),
+    get seedDocIds() {
+      return cognitionSeedDocIds(deps.db, run);
+    },
   });
   // A merge-adjudication run gets its one dedicated verdict tool, scoped to
   // the run's own candidate. Background runs only — the interactive own-tools
@@ -308,8 +350,6 @@ function ownToolsInput(
   opts: {
     runId: string;
     seedDocIds: readonly string[];
-    briefLane: CognitionBriefLane;
-    sweepId?: string;
     triggeringLoopId?: string;
     consumption?: RunConsumptionTracker;
   },
@@ -318,6 +358,7 @@ function ownToolsInput(
   const annotations = deps.getAnnotationSettings?.();
   return {
     db: deps.db,
+    personProfileReads: deps.personProfileReads,
     writeGate: deps.writeGate,
     searchPort: deps.basePorts.search,
     ...(deps.basePorts.temporal ? { temporalPort: deps.basePorts.temporal } : {}),
@@ -326,8 +367,9 @@ function ownToolsInput(
     clock: deps.clock,
     runId: opts.runId,
     seedDocIds: opts.seedDocIds,
-    briefLane: opts.briefLane,
-    ...(opts.sweepId !== undefined ? { sweepId: opts.sweepId } : {}),
+    ...(deps.createObservationScorer
+      ? { scoreObservation: deps.createObservationScorer(opts.runId) }
+      : {}),
     ...(reconcile
       ? {
           reconcileNeighborFanout: reconcile.neighborFanout,
@@ -340,13 +382,13 @@ function ownToolsInput(
           annotationConfidenceCeiling: annotations.confidenceCeiling,
           annotationBasisCeilings: annotations.basisCeilings,
           annotationConfidenceFloor: annotations.confidenceFloor,
+          personProfileBudget: annotations.personProfileBudget,
         }
       : {}),
     ...(deps.validateAnnotationEvidence
       ? { validateAnnotationEvidence: deps.validateAnnotationEvidence }
       : {}),
     ...(deps.getEntailmentVerifier ? { getEntailmentVerifier: deps.getEntailmentVerifier } : {}),
-    ...(deps.getBriefJudge ? { getBriefJudge: deps.getBriefJudge } : {}),
     ...(opts.triggeringLoopId !== undefined ? { triggeringLoopId: opts.triggeringLoopId } : {}),
     ...(opts.consumption ? { consumption: opts.consumption } : {}),
     ...(deps.idGen ? { idGen: deps.idGen } : {}),
@@ -380,9 +422,6 @@ export function buildCognitionInteractiveOwnTools(
     ...ownToolsInput(deps, {
       runId,
       seedDocIds: [],
-      // The interactive surface is not a background lane: its cards face the
-      // strict bar, like any reactive one.
-      briefLane: "reactive",
       consumption: new RunConsumptionTracker(),
     }),
     // User-directed memory remains available when background annotation
@@ -392,6 +431,7 @@ export function buildCognitionInteractiveOwnTools(
 }
 
 export interface CognitionRuntimeDeps {
+  knowledge?: { service: KnowledgeService; engine: KnowledgeEngine };
   db: Db;
   writeGate: WriteGate;
   searchPipeline: SearchPipeline;
@@ -407,12 +447,23 @@ export interface CognitionRuntimeDeps {
   personLookupGate?: PersonLookupGate;
   getSettings: () => ResolvedBrainSettings;
   /** Entailment verifier resolver for the annotation firewall. Optional. */
-  getEntailmentVerifier?: () => Promise<EntailCapability | null>;
+  getEntailmentVerifier?: (signal?: AbortSignal) => Promise<EntailCapability | null>;
   validateAnnotationEvidence?: AnnotationToolDeps["validateAnnotationEvidence"];
   /** The record check on new background annotations. Optional — absent saves them unchecked. */
   recordCheck?: RecordCheck;
-  /** Brief judge (push bar) resolver for `brief_create`. Optional — absent leaves briefs unjudged. */
-  getBriefJudge?: () => BriefJudge | null;
+  /**
+   * The observation pipeline: the morning recheck's judgement seams, the
+   * note-time scorer and the morning brief sender. Absent (storage-only
+   * tests) observations are stored unscored and the morning run sends
+   * nothing.
+   */
+  observations?: {
+    recheck: Omit<ObservationRecheckDeps, "db" | "clock" | "log">;
+    createScorer: (
+      runId: string,
+    ) => (input: ObservationScoringInput) => Promise<ObservationScoringResult>;
+    sender: Omit<MorningBriefSenderDeps, "db" | "clock" | "log">;
+  };
   policyStore?: { get(): Promise<{ revision: string }> };
   /** Derivation stages whose producer is running — see CognitionRunPromptDeps. */
   activeDerivationStages?: () => readonly DerivationStage[];
@@ -514,13 +565,14 @@ export async function createCognitionRuntime(
       confidenceCeiling: deps.getSettings().annotationConfidenceCeiling,
       basisCeilings: deps.getSettings().annotationBasisCeilings,
       confidenceFloor: deps.getSettings().annotationConfidenceFloor,
+      personProfileBudget: deps.getSettings().personProfileBudget,
     }),
     ...(deps.validateAnnotationEvidence
       ? { validateAnnotationEvidence: deps.validateAnnotationEvidence }
       : {}),
     ...(deps.getEntailmentVerifier ? { getEntailmentVerifier: deps.getEntailmentVerifier } : {}),
     ...(deps.recordCheck ? { recordCheck: deps.recordCheck } : {}),
-    ...(deps.getBriefJudge ? { getBriefJudge: deps.getBriefJudge } : {}),
+    ...(deps.observations ? { createObservationScorer: deps.observations.createScorer } : {}),
     clock,
     log: deps.log,
   };
@@ -542,9 +594,125 @@ export async function createCognitionRuntime(
   };
 
   return {
+    preflight: async (run) => {
+      const digest = run.kind === "daily" ? parseCognitionDigestRunPayload(run.payload) : null;
+      if (!digest) return "continue";
+      if (morningBriefSent(deps.db, digest.date)) return "complete";
+      // The brief is written into a conversation; with no conversation agent
+      // running there is nowhere to send it, so wait without calling a model.
+      if (deps.observations && !deps.observations.sender.getPort()) return "defer";
+      let horizon: Awaited<ReturnType<typeof loadDigestHorizon>>;
+      try {
+        horizon = await loadDigestHorizon(temporalQuery, clock(), localTimeZone());
+      } catch {
+        // An unavailable horizon is not an observed empty packet. Retry without inference.
+        return "defer";
+      }
+      // The morning recheck decides which observations ship today; the
+      // composition only ever sees its ranked list.
+      if (deps.observations)
+        await recheckObservations(
+          { ...deps.observations.recheck, db: deps.db, clock, log: deps.log.child("observations") },
+          { runId: run.id, day: digest.date },
+        );
+      return readDigestInputs(deps.db, clock(), deps.getSettings(), horizon, digest.date).hasInputs
+        ? "continue"
+        : "complete";
+    },
+    validateRun: async (run) => {
+      const digest = run.kind === "daily" ? parseCognitionDigestRunPayload(run.payload) : null;
+      if (!digest || !deps.observations || morningBriefSent(deps.db, digest.date)) return null;
+      const horizon = await loadDigestHorizon(temporalQuery, clock(), localTimeZone());
+      return readDigestInputs(deps.db, clock(), deps.getSettings(), horizon, digest.date).hasInputs
+        ? "The morning brief was not sent. Call morning_brief_send exactly once with the complete message."
+        : null;
+    },
     buildTools: (run, executionContext) => {
+      let incompleteRetrievalBoundary: string | undefined;
+      const personProfileReads = new PersonProfileReads(deps.db);
+      const runToolsetDeps = {
+        personProfileReads,
+        ...toolsetDeps,
+        basePorts: {
+          ...basePorts,
+          search: {
+            async search(...args: Parameters<NonNullable<ToolPorts["search"]>["search"]>) {
+              const result = await basePorts.search!.search(...args);
+              const coverage = result.coverage;
+              if (
+                coverage?.status !== "scanned" &&
+                coverage?.corpusBoundary &&
+                (!incompleteRetrievalBoundary ||
+                  coverage.corpusBoundary > incompleteRetrievalBoundary)
+              )
+                incompleteRetrievalBoundary = coverage.corpusBoundary;
+              return result;
+            },
+          },
+        },
+      };
       const consumption = consumptionFor(run);
-      const tools = buildCognitionToolset(toolsetDeps, run, { consumption });
+      const parallel = isParallelKnowledgeRun(deps.db, run.id);
+      const payload =
+        run.kind === "synthesis" ? parseCognitionSynthesisRunPayload(run.payload) : null;
+      const tools =
+        deps.knowledge && payload?.focus === "knowledge-maintenance" && payload.batchId
+          ? buildMaintenanceCanonicalTools(
+              deps.db,
+              deps.writeGate,
+              { batchId: payload.batchId, runId: run.id },
+              (writeGate) =>
+                buildCognitionToolset({ ...runToolsetDeps, writeGate }, run, { consumption }),
+              {
+                parallel,
+                maxVisited: deps.getSettings().knowledge.maxVisitedPerSeed,
+                clock,
+              },
+            )
+          : buildCognitionToolset(runToolsetDeps, run, { consumption });
+      const digest = run.kind === "daily" ? parseCognitionDigestRunPayload(run.payload) : null;
+      if (digest && deps.observations)
+        tools.push(
+          ...withGrantedMutationsOnly(
+            [
+              buildMorningBriefSendTool(
+                {
+                  ...deps.observations.sender,
+                  db: deps.db,
+                  clock,
+                  log: deps.log.child("morning-brief"),
+                },
+                { day: digest.date, runId: run.id },
+              ),
+            ],
+            run,
+          ),
+        );
+      if (deps.knowledge) {
+        tools.push(
+          ...withGrantedMutationsOnly(
+            buildKnowledgeTools(deps.knowledge.service, {
+              runId: run.id,
+              personProfileReads,
+              incompleteRetrievalBoundary: () => incompleteRetrievalBoundary,
+              checkRecord:
+                deps.recordCheck?.forRun(run, { autonomousWithdrawals: true }) ?? undefined,
+              parallel,
+              scopedOwnersOnly: !isGrantedMutation(
+                cognitiveWorkflowIdForRun(run.kind, run.payload),
+                "knowledge_save",
+              ),
+              engine: deps.knowledge.engine,
+              markTemporalPresented: (ids, runId) =>
+                deps.writeGate.markTemporalAnnotationsRefilePresented(ids, runId),
+              ...(payload?.focus === "knowledge-maintenance" && payload.batchId
+                ? { batchId: payload.batchId }
+                : {}),
+            }),
+            run,
+          ),
+        );
+      }
       let successfulReads = successfulDocumentReadsByRun.get(run);
       if (!successfulReads) {
         successfulReads = new Set<string>();
@@ -580,9 +748,14 @@ export async function createCognitionRuntime(
           },
         };
       }
-      return tools;
+      return payload?.focus === "knowledge-maintenance" && payload.batchId
+        ? withKnowledgeSourceReadReceipts(deps.db, tools)
+        : tools;
     },
-    buildOwnTools: (runId) => buildCognitionInteractiveOwnTools(toolsetDeps, runId),
+    buildOwnTools: (runId) => [
+      ...buildCognitionInteractiveOwnTools(toolsetDeps, runId),
+      ...(deps.knowledge ? buildKnowledgeTools(deps.knowledge.service, { runId }) : []),
+    ],
     // Read settings live per run so a config change (and the delta-prime caps
     // it carries) takes on the next run, matching getReconcileSettings above.
     promptBuilder: async (run) => {
@@ -649,6 +822,7 @@ export async function createCognitionRuntime(
       const self = resolveSelfMemory(deps.db, cfg.annotations.enabled);
       consumptionFor(run).note("person", [...self.annotationIds]);
       const basePrompt = buildCognitionRunPrompt(run, {
+        maintenanceRulesInSystem: true,
         db: deps.db,
         graphContext: deps.searchPipeline.agentSearchV2Enabled,
         clock,
@@ -678,18 +852,21 @@ export async function createCognitionRuntime(
       }
       return basePrompt;
     },
-    systemPrompt: () => {
-      // Static for the same settings and the same OMNESIS.md, so the
-      // provider's prefix cache reuses it across runs. The self id lets the
-      // agent write self-memory; the memory itself rides the run message.
+    systemPrompt: (run) => {
+      // Trusted rules stay ahead of the changing root reference context.
+      // Operator instructions retain their own authority section; derived
+      // root prose stays explicitly untrusted even in the system tail.
       const settings = deps.getSettings();
       const annotationsOn = settings.annotations.enabled;
-      return buildCognitionSystemPrompt({
-        notesMaxBytes: settings.notesMaxBytes,
-        annotationsEnabled: annotationsOn,
-        selfPersonId: annotationsOn ? fetchSelfPersonId(deps.db) : null,
-        operatorInstructions: deps.getOperatorInstructions?.() ?? "",
-      });
+      return (
+        buildCognitionSystemPrompt({
+          workflowInstructions: buildCognitionWorkflowInstructions(run),
+          notesMaxBytes: settings.notesMaxBytes,
+          annotationsEnabled: annotationsOn,
+          selfPersonId: annotationsOn ? fetchSelfPersonId(deps.db) : null,
+          operatorInstructions: deps.getOperatorInstructions?.() ?? "",
+        }) + renderKnowledgeRootContext(deps.db, settings.knowledge.rootMaxChars)
+      );
     },
   };
 }

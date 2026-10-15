@@ -3,8 +3,8 @@
 
 /**
  * The minimal OpenAI-compatible chat server the bench's scripted model
- * roles are built on (the puppet steward, the entailment verifier, the
- * brief judge).
+ * roles are built on (the puppet steward, the conversation puppet, the
+ * entailment verifier).
  *
  * Only non-streamed completions are served: a `stream: true` request is
  * answered with a request-shape 400, which `HttpChatBackend`'s resilience
@@ -78,7 +78,7 @@ export function userPromptOf(messages: readonly WireMessage[]): string {
 export async function startOpenAiServer(opts: {
   modelId: string;
   /** Decide the reply for one request. Throwing yields a 500 (the caller's error path). */
-  respond: (messages: readonly WireMessage[]) => WireReply;
+  respond: (messages: readonly WireMessage[]) => WireReply | Promise<WireReply>;
 }): Promise<OpenAiServerHandle> {
   let counter = 0;
 
@@ -115,7 +115,7 @@ export async function startOpenAiServer(opts: {
           return;
         }
 
-        const reply = opts.respond(body.messages);
+        const reply = await opts.respond(body.messages);
         if (reply.kind === "httpError") {
           res.writeHead(reply.status, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: { message: reply.message, type: "invalid_request" } }));

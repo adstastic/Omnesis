@@ -35,9 +35,15 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { createLogger, type Logger } from "@omnesis/core";
+import { createKnowledgeTables } from "../brain/knowledge/schema.js";
+import { createKnowledgePendingReadIndexes } from "../brain/knowledge/pending-work-query.js";
+import { createKnowledgeBatchReadIndexes } from "../brain/knowledge/batch-query.js";
+import { createKnowledgeDecisionTable } from "../brain/knowledge/decision-storage.js";
+import { installKnowledgeOwnerTriggers } from "../brain/knowledge/owner-triggers.js";
+import { createKnowledgeSourceTriggers } from "../brain/knowledge/source-triggers.js";
+import { createKnowledgeWorkTables } from "../brain/knowledge/work-schema.js";
 import {
   createBriefsStorageTables,
-  createBriefClaimsTables,
   createAnnotationStorageTables,
   createPersonAnnotationStorageTables,
   createConsumptionEdgesTables,
@@ -45,7 +51,6 @@ import {
   createBootstrapMarkerIndexes,
   cascadeAnnotationPrivacyDelete,
   cascadePersonAnnotationPrivacyDelete,
-  cascadeBriefClaimPrivacyDelete,
   cascadeOpenLoopPrivacyDelete,
   enqueueRechecksForMissingConsumptionPriors,
   OPEN_LOOP_PROVIDER_ID,
@@ -81,6 +86,7 @@ import {
 } from "../subscriptions/store-schema.js";
 import { createTranscriptionVocabularyState } from "../transcribe/vocabulary/rebuild.js";
 import { installTranscriptionVocabulary } from "../transcribe/vocabulary/storage.js";
+import { createNoteAgentTables } from "../brain/note-agent/storage.js";
 import { migrateV152AccessGrants } from "./migration-152-access-grants.js";
 import { migrateV153AccessPolicyFamilies } from "./migration-153-access-policy-families.js";
 import { markLinkStatsDirty } from "./DirtyMarks.js";
@@ -114,10 +120,22 @@ import {
 import { createSourceMemberConfigContractTable } from "./repositories/SourceMemberConfigContractRepository.js";
 import { createReplicaDeletionClaimsTable } from "./repositories/ReplicaDeletionClaimRepository.js";
 import { foldWebPagesIntoWebSource } from "./fold-web-pages-migration.js";
-import { installCollectorRosterRevision, installMutableListRevisions } from "./list-revisions.js";
+import {
+  installCollectorRosterRevision,
+  installMutableListRevisions,
+  installKnowledgeCoverageRevision,
+} from "./list-revisions.js";
 import { pruneOrphanSourceStats } from "./prune-orphan-source-stats.js";
 import { pruneInvalidEmailAliases } from "./prune-invalid-email-aliases.js";
 import { runSchemaSetup } from "./schema.js";
+import {
+  createLegacyBriefClaimsTables,
+  createLegacyBriefTables,
+  legacyCascadeBriefClaimPrivacyDelete,
+  legacyDeleteBriefsCitingDocs,
+} from "./legacy-brief-tables.js";
+import { retireBriefsForObservations } from "./migration-197-observations.js";
+import { addTaskFieldsToLoops } from "./migration-198-task-fields.js";
 import { addNotesAccessCapability } from "./migration-163-notes-access.js";
 import { addSourceAccountDescriptor } from "./migration-172-source-account.js";
 import { addPersonAliasAssertions } from "./migration-173-alias-assertions.js";
@@ -970,6 +988,7 @@ export const MIGRATIONS: readonly Migration[] = [
       "add Briefs / Cognition Steward storage tables (open loops, briefs, run queue, spend, notes)",
     up(db) {
       createBriefsStorageTables(db);
+      createLegacyBriefTables(db);
     },
   },
   {
@@ -1445,7 +1464,7 @@ export const MIGRATIONS: readonly Migration[] = [
     version: 58,
     description: "add the brief_claims sidecar table",
     up(db) {
-      createBriefClaimsTables(db);
+      createLegacyBriefClaimsTables(db);
     },
   },
   {
@@ -1862,13 +1881,14 @@ export const MIGRATIONS: readonly Migration[] = [
         .map((row) => row.id);
       const deletedLoopIds = new Set<string>();
       const deletedBriefIds = new Set<string>();
+      const deletedObservationIds = new Set<string>();
       const CASCADE_CHUNK = 400;
       while (frontier.length > 0) {
         const nextFrontier: string[] = [];
         for (let i = 0; i < frontier.length; i += CASCADE_CHUNK) {
           const result = cascadeOpenLoopPrivacyDelete(db, frontier.slice(i, i + CASCADE_CHUNK));
           result.deletedLoopIds.forEach((id) => deletedLoopIds.add(id));
-          result.deletedBriefIds.forEach((id) => deletedBriefIds.add(id));
+          result.deletedObservationIds.forEach((id) => deletedObservationIds.add(id));
           for (let j = 0; j < result.deletedLoopIds.length; j += CASCADE_CHUNK) {
             const loopIds = result.deletedLoopIds.slice(j, j + CASCADE_CHUNK);
             if (loopIds.length === 0) continue;
@@ -1903,12 +1923,16 @@ export const MIGRATIONS: readonly Migration[] = [
       const deletedDocAnnotationIds = cascadeAnnotationPrivacyDelete(db, retiredIds);
       const deletedPersonAnnotationIds = cascadePersonAnnotationPrivacyDelete(db, retiredIds);
       cascadeTemporalAnnotationPrivacyDelete(db, retiredIds);
-      cascadeBriefClaimPrivacyDelete(db, retiredIds);
+      legacyCascadeBriefClaimPrivacyDelete(db, retiredIds);
+      for (let i = 0; i < retiredIds.length; i += CASCADE_CHUNK)
+        legacyDeleteBriefsCitingDocs(db, retiredIds.slice(i, i + CASCADE_CHUNK)).forEach((id) =>
+          deletedBriefIds.add(id),
+        );
 
       const deleteConsumptionIds = (
         column: "prior_annotation_id" | "dependent_id",
         discriminatorColumn: "prior_store" | "dependent_kind",
-        discriminator: "doc" | "person" | "loop" | "brief",
+        discriminator: "doc" | "person" | "loop" | "brief" | "observation",
         ids: readonly string[],
       ): void => {
         for (let i = 0; i < ids.length; i += CASCADE_CHUNK) {
@@ -1930,6 +1954,9 @@ export const MIGRATIONS: readonly Migration[] = [
       );
       deleteConsumptionIds("dependent_id", "dependent_kind", "loop", [...deletedLoopIds]);
       deleteConsumptionIds("dependent_id", "dependent_kind", "brief", [...deletedBriefIds]);
+      deleteConsumptionIds("dependent_id", "dependent_kind", "observation", [
+        ...deletedObservationIds,
+      ]);
 
       db.exec(`
         DELETE FROM ${runs}
@@ -4770,6 +4797,60 @@ export const MIGRATIONS: readonly Migration[] = [
     description:
       "retain authored dates, corroborated spellings and contextual evidence for transcription vocabulary",
     up: installTranscriptionVocabulary,
+  },
+  {
+    version: 193,
+    description: "add versioned knowledge claims and durable synthesis maintenance",
+    up(db) {
+      createKnowledgeTables(db);
+      createKnowledgeWorkTables(db);
+      installKnowledgeCoverageRevision(db);
+      createKnowledgeSourceTriggers(db);
+      createKnowledgeDecisionTable(db);
+      installKnowledgeOwnerTriggers(db);
+    },
+  },
+  {
+    version: 194,
+    description: "associate synthesis admission decisions with their run and frontier",
+    up(db) {
+      createKnowledgeDecisionTable(db);
+      createKnowledgeBatchReadIndexes(db);
+    },
+  },
+  {
+    version: 195,
+    description: "retain bounded privacy-fenced urgency inputs and applied work schedules",
+    up: createKnowledgeDecisionTable,
+  },
+  {
+    version: 196,
+    description: "retain exact decision payloads with multi-subject privacy erasure",
+    up(db) {
+      createKnowledgeDecisionTable(db);
+      createKnowledgePendingReadIndexes(db);
+    },
+  },
+  {
+    // Briefs become observations: private notes for the morning brief. The
+    // brief tables, their knowledge nodes and their consumption edges are
+    // removed, and knowledge_nodes is rebuilt so its kind constraint names
+    // observations instead of briefs. The rebuild needs foreign keys off
+    // (claims and revisions reference the table), hence ownTransaction.
+    version: 197,
+    description: "replace briefs with observations",
+    ownTransaction: true,
+    up: retireBriefsForObservations,
+  },
+  {
+    version: 198,
+    description: "open loops become tasks: origin, acceptance, schedule, proposals, events",
+    up: addTaskFieldsToLoops,
+  },
+  {
+    version: 199,
+    description: "note agent queue: one row per Tell Omnesis note it reads, with its receipt",
+    up: createNoteAgentTables,
   },
 ];
 

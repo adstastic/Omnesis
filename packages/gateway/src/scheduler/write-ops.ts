@@ -23,6 +23,7 @@
  */
 
 import { writeGateFromCall, type WriteGate, type WriterCallFn } from "../write-gate.js";
+import { KnowledgeStorageError } from "../brain/knowledge/types.js";
 import { rehydrateAnswerStoreError } from "../privacy/store.js";
 import { rehydrateSourceModeTransitionPrepareError } from "../data/repositories/SourceModeTransitionRepository.js";
 import { TaskExecutionError, type Priority, type Task } from "./types.js";
@@ -56,6 +57,50 @@ const DEFAULT_BUDGET_MS = 200;
 const HEAVY_BUDGET_MS = 500;
 
 const WRITE_OP_DEFS: readonly WriteOpDef[] = [
+  { name: "knowledge.outcomeAssessmentAttempt", priority: "background" },
+  { name: "knowledge.continueRun", priority: "background" },
+  { name: "knowledge.canonicalMutation", priority: "background" },
+  { name: "knowledge.save", priority: "background" },
+  { name: "knowledge.admitCanonical", priority: "background" },
+  { name: "knowledge.discoveryTargets", priority: "background" },
+  { name: "knowledge.publishCandidate", priority: "background" },
+  { name: "knowledge.syncOwners", priority: "background" },
+  { name: "knowledge.link", priority: "background" },
+  { name: "knowledge.decision", priority: "background" },
+  { name: "knowledge.abandonBatch", priority: "background" },
+  { name: "knowledge.scheduleReview", priority: "background" },
+  { name: "knowledge.checkpoint", priority: "background" },
+  { name: "knowledge.retireBeyondHorizon", priority: "background" },
+  { name: "knowledge.admitOrganization", priority: "background" },
+  { name: "knowledge.reconsiderRetrieval", priority: "background" },
+  { name: "knowledge.adoptWork", priority: "background" },
+  { name: "knowledge.promoteBlockingBatches", priority: "background" },
+  { name: "knowledge.refreshWork", priority: "background" },
+  { name: "knowledge.queueProjectionCleanup", priority: "background" },
+  { name: "knowledge.ackProjectionCleanup", priority: "background" },
+
+  { name: "knowledge.saveOwned", priority: "background" },
+  { name: "knowledge.convertOwner", priority: "background" },
+  { name: "knowledge.settleFrontier", priority: "background" },
+  { name: "knowledge.coverage", priority: "background" },
+  { name: "knowledge.proposeCandidate", priority: "background" },
+  { name: "knowledge.settleCandidate", priority: "background" },
+
+  { name: "knowledge.evidence", priority: "background" },
+  { name: "knowledge.sourceChanged", priority: "background" },
+  { name: "knowledge.advanceCascade", priority: "background" },
+  { name: "knowledge.invalidate", priority: "background" },
+  { name: "knowledge.purge", priority: "background" },
+  { name: "knowledge.ackChanges", priority: "background" },
+  { name: "knowledge.enqueue", priority: "background" },
+  { name: "knowledge.startBatch", priority: "background" },
+  { name: "knowledge.startOrganization", priority: "background" },
+  { name: "knowledge.completeOrganization", priority: "background" },
+  { name: "knowledge.classifyInitialRootBatches", priority: "background" },
+  { name: "knowledge.appendFrontier", priority: "background" },
+  { name: "knowledge.frontierOutcome", priority: "background" },
+  { name: "knowledge.finishBatch", priority: "background" },
+
   { name: "vocabulary.advanceRebuild", priority: "background" },
   { name: "vocabulary.applyBatch", priority: "background" },
   // ── db.ts — bulk writes ────────────────────────────────────────────
@@ -389,7 +434,7 @@ const WRITE_OP_DEFS: readonly WriteOpDef[] = [
   // small transaction over a table with one row per installed source type.
   { name: "sources.upsertDocumentProfiles", priority: "realtime" },
 
-  // ── briefs (the Cognition Steward run queue) ───────────────────────────────
+  // ── the Cognition Steward run queue ───────────────────────────────────────
   // Agent runs are asynchronous background work that must never contend
   // with ingest or interactive writes.
   { name: "cognition.enqueue", priority: "background" },
@@ -405,14 +450,14 @@ const WRITE_OP_DEFS: readonly WriteOpDef[] = [
   { name: "cognition.engineStateSet", priority: "background" },
   { name: "cognition.recordCognitionSpend", priority: "background" },
   { name: "cognition.recordDecision", priority: "background" },
-  // Loop/brief/notes mutations issued by the Cognition Steward's tools mid-run —
+  // Loop/observation/notes mutations issued by the Cognition Steward's tools mid-run —
   // background like the rest: agent runs never contend with ingest.
   { name: "cognition.openLoopCreate", priority: "background" },
   { name: "cognition.openLoopUpdate", priority: "background" },
   { name: "cognition.openLoopRewritePeople", priority: "background" },
   { name: "cognition.openLoopLedgerAppend", priority: "background" },
   { name: "cognition.openLoopDelete", priority: "background" },
-  // Retract the loops (and their attached briefs) whose supporting documents
+  // Retract the loops (and their attached observations) whose supporting documents
   // were deleted in bulk. Background: it trails a sweep the operator has
   // already been told completed.
   { name: "cognition.openLoopCascade", priority: "background" },
@@ -427,12 +472,6 @@ const WRITE_OP_DEFS: readonly WriteOpDef[] = [
   { name: "cognition.annotationDelete", priority: "background" },
   { name: "cognition.annotationInvalidate", priority: "background" },
   { name: "cognition.annotationPrivacyDelete", priority: "user" },
-  // Brief-claim evidence-lifecycle ops: content-change invalidation is an
-  // ordinary background write like its annotation sibling; the privacy
-  // cascade rides a user-initiated document delete (the claim's
-  // evidence_quote is the removed content verbatim), so user priority.
-  { name: "cognition.briefClaimInvalidate", priority: "background" },
-  { name: "cognition.briefClaimPrivacyDelete", priority: "user" },
   // Durable person-annotation ops — the person-keyed sibling of the doc ones.
   // create/revise/retract/invalidate are ordinary background steward writes;
   // privacyDelete rides a user-initiated document delete (user priority).
@@ -508,26 +547,28 @@ const WRITE_OP_DEFS: readonly WriteOpDef[] = [
   { name: "temporalAnnotations.invalidateForDoc", priority: "background" },
   { name: "temporalAnnotations.refilePresented", priority: "background" },
   { name: "temporalAnnotations.privacyDelete", priority: "user" },
-  { name: "cognition.briefCreate", priority: "background" },
-  { name: "cognition.briefUpdate", priority: "background" },
-  // The agent withdrawing its own card.
-  { name: "cognition.briefRetire", priority: "background" },
-  // Loop-resolve cascade: retract a resolved loop's still-actionable briefs.
-  { name: "cognition.briefRetractForLoop", priority: "background" },
+  // Observations and the morning brief: background steward writes.
+  { name: "cognition.observationCreate", priority: "background" },
+  { name: "cognition.observationTransition", priority: "background" },
+  { name: "cognition.observationScores", priority: "background" },
+  { name: "cognition.observationClaims", priority: "background" },
+  { name: "cognition.observationExpire", priority: "background" },
+  { name: "cognition.observationDropForLoop", priority: "background" },
+  { name: "cognition.observationPrune", priority: "background" },
+  { name: "cognition.morningBriefItems", priority: "background" },
+  { name: "cognition.morningBriefSent", priority: "background" },
+  // Recording what the user did about an observation rides a conversation
+  // turn the user is waiting on, so user priority.
+  { name: "cognition.observationUserAction", priority: "user" },
+  { name: "cognition.taskCommand", priority: "user" },
+  { name: "cognition.taskPropose", priority: "background" },
+  { name: "noteAgent.enqueue", priority: "background" },
+  { name: "cognition.morningBriefItemsClear", priority: "background" },
+  { name: "noteAgent.claim", priority: "background" },
+  { name: "noteAgent.finish", priority: "background" },
   { name: "cognition.notesWrite", priority: "background" },
   { name: "cognition.notesAppend", priority: "background" },
   { name: "cognition.notesEdit", priority: "background" },
-  // The two user-driven writes in the feature (HTTP POSTs from the feed:
-  // the dismiss modal and the per-brief mark-read), so user priority like
-  // the trigger CRUD ops: a tap in the app must not wait behind ingest.
-  { name: "cognition.briefDismiss", priority: "user" },
-  { name: "cognition.briefMarkRead", priority: "user" },
-  // Talk-back thread stamps — user priority: both run on the HTTP path
-  // of "open the brief's thread", which must not wait behind ingest.
-  { name: "cognition.briefSetThread", priority: "user" },
-  { name: "cognition.briefRestampThread", priority: "user" },
-  // Durable snooze resurface — a background rhythm sweep, not user-driven.
-  { name: "cognition.snoozeResurface", priority: "background" },
   // The operator CLI's notes wipe — user priority for the same reason:
   // an operator command must not wait behind ingest.
   { name: "cognition.notesWipe", priority: "user" },
@@ -539,12 +580,13 @@ const WRITE_OP_DEFS: readonly WriteOpDef[] = [
   // realtime sync writes or interactive search-handle traffic would
   // be wrong. Small write (typically <10 rows) so the default budget
   // is fine.
+  { name: "omnesisChat.upsertConversationDocument", priority: "background" },
   { name: "omnesisChat.upsertConversationCitations", priority: "background" },
 
   // ── omnesis-notes ─────────────────────────────────────────────────
   // All three ride user-driven HTTP requests (POST/PATCH/DELETE /notes)
   // with a human waiting on the response, so "user" priority like the
-  // other interactive writes (briefDismiss, createMergeRule): a quick
+  // other interactive writes (createMergeRule): a quick
   // capture must not sit behind a bulk backfill. Small single-row
   // writes; the default budget is fine.
   { name: "notes.appendEntry", priority: "user" },
@@ -647,6 +689,28 @@ export function writeGateFromScheduler(scheduler: Scheduler): WriteGate {
     // contract on `WriterCallFn` is what keeps caller-args aligned.
     return (scheduler.enqueue(task, args as unknown[]) as Promise<never>).catch(
       (error: unknown) => {
+        if (
+          op.startsWith("knowledge.") &&
+          error instanceof TaskExecutionError &&
+          error.cause instanceof Error &&
+          error.cause.name === "KnowledgeStorageError"
+        ) {
+          const code = (error.cause as Error & { code?: unknown }).code;
+          if (
+            typeof code === "string" &&
+            [
+              "revision_conflict",
+              "reference_invalid",
+              "claim_invalid",
+              "cycle",
+              "root_conflict",
+            ].includes(code)
+          )
+            throw new KnowledgeStorageError(
+              code as KnowledgeStorageError["code"],
+              error.cause.message,
+            );
+        }
         if (
           op.startsWith("privacy.") &&
           error instanceof TaskExecutionError &&

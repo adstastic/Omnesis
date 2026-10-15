@@ -18,6 +18,7 @@ import {
   createLogger,
   DEFAULT_CONFIG_DIR,
   ensurePrivateDirSync,
+  experimentalEnabled,
   experimentalVisible,
   loadManifest,
   primeSecretFileKeyCache,
@@ -26,6 +27,7 @@ import {
 } from "@omnesis/core";
 import { type OmnesisConfig } from "@omnesis/config";
 import { Ontology } from "@omnesis/watch";
+import { selectSubagentTools } from "@omnesis/agent";
 import { dotEnvKeysAtBoot } from "./load-env.js";
 import {
   resolveAnthropicApiKey,
@@ -50,10 +52,20 @@ import {
   SweepService,
 } from "./brain/index.js";
 import {
-  BRIEF_JUDGE_SPEND_MECHANISM,
   ENTAILMENT_GATE_SPEND_MECHANISM,
+  NOTE_AGENT_SPEND_MECHANISM,
 } from "./agent/spend-recorder.js";
 import { bootDateEnrichment } from "./enrichment/dates/task.js";
+import { renderDailyBriefContext } from "./brain/observations/brief-thread-context.js";
+import { readDailyBriefDetail } from "./brain/observations/brief-detail.js";
+import { buildTaskTools } from "./brain/tasks/tools.js";
+import { TaskService, type TaskEffects } from "./brain/tasks/service.js";
+import { createOpenLoopMirror } from "./brain/steward/mirror.js";
+import { NoteAgent } from "./brain/note-agent/runner.js";
+import { redactTaintedMorningBriefs } from "./brain/observations/redaction.js";
+import { toCognitionRunUsage } from "./brain/run-driver.js";
+import { notesDayDocumentId } from "./sources/omnesis-notes/storage.js";
+import { hasPendingNotes } from "./brain/note-agent/storage.js";
 import { recordDecisionSpend } from "./brain/decision-call.js";
 import { bootMentionWorthGate } from "./enrichment/dates/worth-gate-task.js";
 import { countPendingMentionJudgements } from "./enrichment/dates/mention-judgements.js";
@@ -64,7 +76,6 @@ import {
 import { countPendingDateExtraction } from "./enrichment/dates/storage.js";
 import { resolveBriefsVirtualClock } from "./brain/virtual-clock.js";
 import { backgroundAgentBackendResolver } from "./brain/backend-resolver.js";
-import { LlmBriefJudge } from "./brain/steward/brief-judge.js";
 import { CognitionRunActivity } from "./brain/run-activity.js";
 import { FsCognitionTranscriptStore, cognitionTranscriptsDir } from "./brain/transcripts.js";
 import { drainTranscriptEvictions } from "./brain/transcript-eviction.js";
@@ -92,7 +103,7 @@ import { updateCollectorDeclarationPresence } from "./domain/LinkDeclarationServ
 import { BackupService, DEFAULT_PRE_UPDATE_BACKUP_COUNT } from "./http/services/BackupService.js";
 import { ExportService } from "./http/services/ExportService.js";
 import { FsConversationStore } from "./agent/conversation-store.js";
-import { AgentLifecycle, resolveRoleBackend } from "./agent/agent-lifecycle.js";
+import { AgentLifecycle } from "./agent/agent-lifecycle.js";
 import { TemporalQueryService } from "./enrichment/temporal/temporal-query-service.js";
 import { sendAgentAnswerPush } from "./agent/answer-push.js";
 import { ConfigChangeOrchestrator } from "./http/services/ConfigChangeOrchestrator.js";
@@ -149,6 +160,7 @@ import {
   createCleanupTasks,
   createBackendReprobeTask,
   createSubscriptionDeliveriesTask,
+  type PeriodicTask,
 } from "./scheduler/index.js";
 import {
   announceRuntimeSettings,
@@ -1217,9 +1229,15 @@ const codexRuntimeService = new CodexRuntimeService({
   interactivePoolSize:
     parseNonNegativeIntEnv("OMNESIS_CODEX_INTERACTIVE_POOL_SIZE") ??
     config.inference?.codex?.interactivePoolSize,
+  backgroundPoolSize:
+    parseNonNegativeIntEnv("OMNESIS_CODEX_BACKGROUND_POOL_SIZE") ??
+    config.inference?.codex?.backgroundPoolSize,
   inferencePoolSize:
     parseNonNegativeIntEnv("OMNESIS_CODEX_INFERENCE_POOL_SIZE") ??
     config.inference?.codex?.inferencePoolSize,
+  turnIdleTimeoutMs:
+    parseNonNegativeIntEnv("OMNESIS_CODEX_TURN_IDLE_TIMEOUT_MS") ??
+    config.inference?.codex?.turnIdleTimeoutMs,
   getSubagentDepthCap: () =>
     configStore.get().agent?.subagentDepthCap ?? CONFIG_DEFAULTS.agent.subagentDepthCap,
 });
@@ -1319,6 +1337,8 @@ searchPipeline.setTemporalIndex(
 );
 
 const agentLifecycle = new AgentLifecycle({
+  getGroundingVerifier: (signal) => entailmentService.get(signal),
+  isGroundingEnabled: () => briefsFeatureStatus(inferenceRegistry, chatRoleReadinessDeps).active,
   inferenceRegistry,
   config,
   configStore,
@@ -1804,6 +1824,10 @@ const entailmentService = new EntailmentVerifierService({
           {
             promptTokens: u.promptTokens,
             completionTokens: u.completionTokens,
+            ...(u.cacheReadTokens !== undefined ? { cacheReadTokens: u.cacheReadTokens } : {}),
+            ...(u.cacheCreationTokens !== undefined
+              ? { cacheCreationTokens: u.cacheCreationTokens }
+              : {}),
           },
         )
         .catch((err) => {
@@ -1846,13 +1870,6 @@ const sweepService = new SweepService({
   },
   log: log.child("sweeps"),
 });
-
-// Talk-back port holder: createServer runs before bootBriefs, so the
-// routes read through this live reference; bootBriefs fills it when the
-// Briefs feature comes up active.
-const briefTalkback: {
-  port: import("./brain/talkback/talkback-service.js").BriefTalkbackPort | null;
-} = { port: null };
 
 // Omnesis Notes runtime. Booted inside createServer (it
 // needs DocumentService.ingest); held here for the shutdown sequence —
@@ -2304,7 +2321,18 @@ const diskUsage = new DiskUsageMonitor(() =>
 void diskUsage.refresh();
 
 const httpShutdown = new GatewayHttpShutdown();
+// What follows a task change, wherever it is made: the searchable loop mirror
+// (only while the Brain runs, which seeds its source), retracting scheduled
+// checks and dropping observations about a resolved task.
+const taskEffects: TaskEffects = {
+  writeGate,
+  ...(experimentalEnabled()
+    ? { mirror: createOpenLoopMirror({ db, writeGate, log: log.child("task-mirror") }) }
+    : {}),
+};
+const taskService = new TaskService(db, writeGate, briefsVirtualClock ?? Date.now, taskEffects);
 const app = createServer(db, DB_PATH, {
+  taskEffects,
   getDiskUsage: () => diskUsage.snapshot(),
   requestAdmission: (_c, next) => Promise.resolve(httpShutdown.guard(next)),
   // The same store the agent prompts read from, so a portal save and the next
@@ -2484,12 +2512,12 @@ const app = createServer(db, DB_PATH, {
   getConfigHealth: () => inferenceRegistry.configHealth(),
   getReleaseCheck: () => releaseCheckService.snapshot(),
   getBriefsStatus: () => briefsFeatureStatus(inferenceRegistry, chatRoleReadinessDeps),
+  getNoteAgentActive: () => noteAgent.active(),
   getDictationStatus: () =>
     dictationFeatureStatus({
       transcriberReadiness: () => transcribeService.readiness(),
       getConfig: () => configStore.get(),
     }),
-  getBriefTalkback: () => briefTalkback.port,
   briefsClock: briefsVirtualClock ?? undefined,
   cognitionActivity,
   sweeps: sweepService,
@@ -2500,7 +2528,12 @@ const app = createServer(db, DB_PATH, {
   io: ioGate,
   getBootstrapSettings: () => {
     const b = resolveBrainSettings(configStore.get().brain);
-    return { ...b.bootstrap, recencyWindowMs: b.recencyWindowMs };
+    return {
+      ...b.bootstrap,
+      recencyWindowMs: b.recencyWindowMs,
+      knowledgeRecentWindowMs: b.knowledge.recentWindowMs,
+      knowledge: true,
+    };
   },
   getBudgetSettings: () => resolveBrainSettings(configStore.get().brain).budget,
   // Idempotent: an already-started lane keeps its original instant, so a
@@ -2512,6 +2545,7 @@ const app = createServer(db, DB_PATH, {
     if (existing !== null) return Number(existing) || nowMs;
     await writeGate.setCognitionEngineState(COGNITION_BOOTSTRAP_STARTED_AT_KEY, String(nowMs));
     scheduler.kickPeriodic("cognition.bootstrap");
+    scheduler.kickPeriodic("knowledge.maintenance");
     return nowMs;
   },
   probeBackend: (key: string) => inferenceRegistry.probeBackend(key),
@@ -2564,43 +2598,6 @@ void reconcileWakeAnchors?.();
 // render a placeholder glyph. Idempotent — setSourceMeta COALESCEs.
 await seedWebSourceMeta(writeGate);
 
-// The background-agent backend resolver for the run drainer (resolved fresh
-// per run so a live model swap takes effect on the next run).
-// Brief judging uses an independent inference lane, including when the parent
-// background agent and the judge use the same Codex model and account.
-const resolveBriefJudgeBackend = () =>
-  resolveRoleBackend("brief-judge", {
-    inferenceRegistry,
-    codexRuntimeService,
-    claudeCodeService,
-    configDir,
-    db,
-    maxToolIterations: undefined,
-    log,
-  });
-const briefJudge = new LlmBriefJudge({
-  resolveBackend: resolveBriefJudgeBackend,
-  recordUsage: (u) => {
-    writeGate
-      .recordCognitionSpend(
-        cognitionSpendDay(Date.now()),
-        BRIEF_JUDGE_SPEND_MECHANISM,
-        u.modelId,
-        {
-          promptTokens: u.promptTokens,
-          completionTokens: u.completionTokens,
-        },
-        { countRun: u.countRun },
-      )
-      .catch((err) => {
-        log.warn(
-          `Failed to record brief-judge spend: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
-  },
-  log,
-});
-
 // Briefs feature gate (experimental). Seeds the
 // open-loops system source and starts the Agent Run Queue drainer plus the
 // real-time waker only when the feature is active (experimental mode on AND
@@ -2626,14 +2623,118 @@ const validateAnnotationEvidence = (documentId: string, quote: string) =>
     documentId,
     quote,
   );
-agentLifecycle.setInteractiveMemoryProfile(
-  createInteractiveMemoryProfile({
+const interactiveMemoryProfile = createInteractiveMemoryProfile({
+  db,
+  writeGate,
+  getSettings: () => resolveBrainSettings(configStore.get().brain),
+  getEntailmentVerifier: (signal) => entailmentService.get(signal),
+  validateAnnotationEvidence,
+  log: log.child("memory"),
+});
+agentLifecycle.setInteractiveMemoryProfile(interactiveMemoryProfile);
+agentLifecycle.setDailyBriefContextProvider((latest) => renderDailyBriefContext(db, latest));
+agentLifecycle.setDailyBriefDetailReader((brief) => readDailyBriefDetail(db, brief));
+// The note agent: one bounded background-agent turn per Tell Omnesis note.
+// On whenever a background-agent model is runnable; no experimental gate.
+const noteAgent = new NoteAgent({
+  db,
+  tasks: taskService,
+  writeGate,
+  resolveBackend: resolveBackgroundAgentBackend,
+  buildMemoryTools: (runId) => interactiveMemoryProfile.buildOwnTools(runId),
+  readTools: () => {
+    const service = agentLifecycle.routeDeps.agentService;
+    return service ? selectSubagentTools(service.listTools()) : [];
+  },
+  dayDocumentId: (day) => notesDayDocumentId(db, day),
+  recordUsage: (usage, modelId) =>
+    writeGate.recordCognitionSpend(
+      cognitionSpendDay(Date.now()),
+      NOTE_AGENT_SPEND_MECHANISM,
+      modelId,
+      toCognitionRunUsage(usage),
+    ),
+  ...(briefsVirtualClock ? { clock: briefsVirtualClock } : {}),
+  log: log.child("note-agent"),
+});
+try {
+  await noteAgent.start();
+} catch (err) {
+  log
+    .child("note-agent")
+    .warn(`note agent start failed: ${err instanceof Error ? err.message : String(err)}`);
+}
+const noteAgentDrainTask: PeriodicTask<undefined, undefined> = {
+  name: "noteAgent.drain",
+  runner: "main",
+  priority: "background",
+  periodMs: 5_000,
+  idlePeriodMs: 15_000,
+  startDelayMs: 10_000,
+  latencyBudgetMs: 60_000,
+  initialArgs: undefined,
+  // Every tick queues new notes; the faster cadence only matters while some are waiting.
+  isIdle: () => !hasPendingNotes(db),
+  async run() {
+    // A note turn takes seconds to minutes: run it off the scheduler's runner.
+    void noteAgent.drain().catch((err: unknown) => {
+      log
+        .child("note-agent")
+        .warn(`note agent drain failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    return { kind: "done", value: undefined };
+  },
+};
+scheduler.schedule(noteAgentDrainTask);
+const noteAgentDrainJob = periodicJob(noteAgentDrainTask, {
+  scheduler,
+  displayName: "Note agent",
+  description: "Read each Tell Omnesis note once it settles and act on the tasks it asks for.",
+  isDisabled: () => !noteAgent.active(),
+  category: "briefs",
+  tracker: new StatelessTracker(),
+});
+// A brief that quoted a since-deleted source loses its text. Cheap when there
+// is nothing to do; briefs exist only once the Brain has sent one.
+scheduler.schedule({
+  name: "morningBrief.redact",
+  runner: "main",
+  priority: "background",
+  periodMs: 60_000,
+  idlePeriodMs: 300_000,
+  startDelayMs: 30_000,
+  latencyBudgetMs: 60_000,
+  initialArgs: undefined,
+  isIdle: (count) => count === 0,
+  async run() {
+    try {
+      const count = await redactTaintedMorningBriefs({
+        db,
+        writeGate,
+        getConversations: () => agentLifecycle.routeDeps.agentService ?? null,
+        log: log.child("morning-brief"),
+      });
+      return { kind: "done", value: count };
+    } catch (err) {
+      log
+        .child("morning-brief")
+        .warn(`brief redaction failed: ${err instanceof Error ? err.message : String(err)}`);
+      return { kind: "done", value: 0 };
+    }
+  },
+});
+agentLifecycle.setTaskToolsProvider((conversationId) =>
+  buildTaskTools({
     db,
+    tasks: taskService,
     writeGate,
-    getSettings: () => resolveBrainSettings(configStore.get().brain),
-    getEntailmentVerifier: () => entailmentService.get(),
-    validateAnnotationEvidence,
-    log: log.child("memory"),
+    origin: {
+      surface: "conversation",
+      runId: `user:conversation:${conversationId}`,
+      conversationId,
+    },
+    observations: experimentalVisible(),
+    ...(briefsVirtualClock ? { clock: briefsVirtualClock } : {}),
   }),
 );
 subscribeMemoryInvalidators({
@@ -2676,25 +2777,17 @@ await bootBriefs({
       // Read-worker gate for `lookup_people`; the steward wraps its calls at
       // background priority so background runs never jump ahead of interactive.
       personLookupGate: ioGate,
-      getEntailmentVerifier: () => entailmentService.get(),
+      getEntailmentVerifier: (signal) => entailmentService.get(signal),
       validateAnnotationEvidence,
-      // Push bar — live-gated by brain.judge.enabled; null ⇒ ship unjudged.
-      getBriefJudge: () =>
-        resolveBrainSettings(configStore.get().brain).judge.enabled ? briefJudge : null,
       policyStore: subscriptionsPolicyStore,
     },
   },
-  talkback: {
-    setProfile: (profile) => agentLifecycle.setAnchoredThreadProfile(profile),
-    expose: (port) => {
-      briefTalkback.port = port;
-    },
-    getAgentService: () => agentLifecycle.routeDeps.agentService ?? null,
+  morningBrief: {
+    getConversationPort: () => agentLifecycle.routeDeps.agentService ?? null,
   },
   interactiveWrite: {
     setProfile: (profile) => agentLifecycle.setInteractiveWriteProfile(profile),
   },
-  push: pushBroadcaster,
   getLegacySweepOverrides: () => configStore.get().brain?.sweeps ?? {},
 });
 
@@ -3265,6 +3358,7 @@ backgroundJobs.registerAll([
   ...subscriptionDeliveriesBundle.jobs,
   sourcePermissionReminderJob,
   ...derivationSlaBundle.jobs,
+  noteAgentDrainJob,
 ]);
 
 // Start indexer asynchronously — don't block the HTTP server.

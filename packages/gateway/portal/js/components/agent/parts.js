@@ -20,6 +20,7 @@ export { ephemeralResultArrived } from "../../shared/agent-ui/lifecycle.js";
 
 import { useState, useRef, useEffect } from "preact/hooks";
 import { sourceIcon, sourceLabel } from "../../lib/format.js";
+import { KnowledgeIcon } from "../../lib/knowledge-link-icons.js";
 import { navigate } from "../../lib/router.js";
 import { AssistantMarkdown } from "./assistant-markdown.js";
 import { DocChip } from "../doc-chip.js";
@@ -72,7 +73,9 @@ function AgentFailureCodes({ failure, className = "agent-msg-error-codes" }) {
   </span>`;
 }
 
-export function MessageBubble({ turn, citations, dispatch }) {
+// `header` and `footer` are optional slots around the message — the Morning
+// brief thread puts its brief header above a brief and its sources below it.
+export function MessageBubble({ turn, citations, dispatch, header = null, footer = null }) {
   const count = turn.role === "assistant" ? (turn.citationCount ?? 0) : 0;
   // Pre-compute citation-pill coalescing: every consecutive run of
   // pending annotate tool parts collapses into ONE pill rendered at the
@@ -83,6 +86,7 @@ export function MessageBubble({ turn, citations, dispatch }) {
   const pillRuns = computeCitationPillRuns(turn.parts ?? []);
   return html`
     <div class=${`agent-msg agent-msg-${turn.role}`}>
+      ${header}
       <div class="agent-msg-body">
         ${turn.parts.map((part, i) =>
           // A thinking part is "live" only while it is the trailing part of
@@ -115,6 +119,7 @@ export function MessageBubble({ turn, citations, dispatch }) {
       ${count > 0
         ? html`<div class="agent-msg-footer"><${CitationCountChip} count=${count} /></div>`
         : null}
+      ${footer}
     </div>
   `;
 }
@@ -421,11 +426,10 @@ const EPHEMERAL_ACTION_TOOLS = new Set([
   "open_loop_update",
   "open_loop_delete",
   "open_loop_ledger_append",
-  "brief_list",
-  "brief_fetch",
-  "brief_create",
-  "brief_update",
-  "brief_delete",
+  "observation_list",
+  "observation_note",
+  "observation_withdraw",
+  "observation_suppress",
   "temporal_annotation_add",
   "temporal_annotation_update",
   "temporal_annotation_delete",
@@ -461,7 +465,7 @@ function personHref(canonicalId) {
 // Loop detail lives on the debug cognition surface — the same target the
 // cognition view's own cross-entity links use.
 function loopHref(loopId) {
-  return `/portal/debug/cognition/loops/${encodeURIComponent(loopId)}`;
+  return `/portal/debug/cognition/knowledge/${encodeURIComponent(loopId)}?kind=loop`;
 }
 
 // In-SPA navigation for transcript links. Modifier/middle clicks fall
@@ -557,7 +561,7 @@ function entitySeedDisplay(args, data) {
     };
   }
   if (seedKind === "loop") {
-    return { text: label, icon: LOOP_GLYPH, href: seedId ? loopHref(seedId) : null };
+    return { text: label, icon: html`<${KnowledgeIcon} kind="loop" />`, href: seedId ? loopHref(seedId) : null };
   }
   if (seedKind === "person") {
     return { text: label, icon: PEOPLE_GLYPH, href: seedId ? personHref(seedId) : null };
@@ -1279,9 +1283,14 @@ function ToolCallChip({ call }) {
   `;
 }
 
-function prettyToolName(tool) {
+export function prettyToolName(tool) {
   switch (tool) {
     case "trace_connections": return "Trace connections";
+    // Task tools change the owner's journal, so they stay visible as chips.
+    case "task_list":         return "Check tasks";
+    case "task_create":       return "Add a task";
+    case "task_update":       return "Update a task";
+    case "task_undo":         return "Undo a task change";
     default:                  return tool;
   }
 }
@@ -1305,7 +1314,7 @@ function renderToolResult(result) {
 function loopRow(loop) {
   const inner = html`
     <span class="agent-loop-state agent-loop-state-${loop.state}">${loop.state}</span>
-    <span class="agent-loop-title">${loop.title || "Untitled loop"}</span>`;
+    <span class="agent-loop-title"><${KnowledgeIcon} kind="loop" />${loop.title || "Untitled loop"}</span>`;
   return loop?.loopId
     ? html`<a
         class="agent-loop-row agent-ephemeral-result-link"
@@ -1321,7 +1330,7 @@ function loopRow(loop) {
 function loopHeaderExtra(loop) {
   const opened = html`
     <span class="agent-loop-state agent-loop-state-${loop.state}">${loop.state}</span>
-    <span>${loop.title || "Untitled loop"}</span>`;
+    <span><${KnowledgeIcon} kind="loop" />${loop.title || "Untitled loop"}</span>`;
   const id = loop.loopId ?? loop.id;
   return id
     ? html`<a
@@ -1648,7 +1657,7 @@ const SLASH_ICONS = {
  * character so the empty state stays uncluttered. When the slash menu is
  * open, Enter selects the highlighted command instead of sending.
  */
-export function Composer({ disabled, onSubmit, onCancel, busy, variant = "default", autoFocus = false, experimental = false }) {
+export function Composer({ disabled, onSubmit, onCancel, busy, variant = "default", autoFocus = false, experimental = false, placeholder = null }) {
   const [text, setText] = useState("");
   // The armed per-message command (a SLASH_COMMANDS descriptor) or null.
   // Cleared after each send so the next message is an ordinary turn unless
@@ -1743,7 +1752,7 @@ export function Composer({ disabled, onSubmit, onCancel, busy, variant = "defaul
         ref=${taRef}
         name="text"
         class="agent-composer-input"
-        placeholder=${busy ? "Working…" : (variant === "hero" ? "Ask Omnesis" : "Ask Omnesis…")}
+        placeholder=${busy ? "Working…" : (placeholder ?? (variant === "hero" ? "Ask Omnesis" : "Ask Omnesis…"))}
         disabled=${disabled}
         value=${text}
         onInput=${(e) => setText(e.target.value)}

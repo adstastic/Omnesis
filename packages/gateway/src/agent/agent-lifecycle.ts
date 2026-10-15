@@ -20,6 +20,7 @@ import {
   AnthropicBackend,
   HttpAgentBackend,
   buildBuiltinTools,
+  CitationReads,
   createBuiltinSpecialistRegistry,
   type ChatBackend,
 } from "@omnesis/agent";
@@ -29,6 +30,7 @@ import {
   experimentalVisible,
   CLOUD_EGRESS_DISABLED_REASON,
   type CapabilityRole,
+  type EntailCapability,
   type Logger,
 } from "@omnesis/core";
 import { CONFIG_DEFAULTS } from "@omnesis/config";
@@ -50,6 +52,10 @@ import { PrivacyReviewer } from "../privacy/reviewer.js";
 import { cognitionSpendDay } from "../brain/storage/spend.js";
 import { toCognitionRunUsage } from "../brain/run-driver.js";
 import { renderOperatorInstructionsSection } from "../instructions/render.js";
+import {
+  captureKnowledgeRootContext,
+  isCapturedKnowledgeRootSupportCurrent,
+} from "../brain/knowledge/root-context.js";
 import { makeReplayBackendFactory } from "./replay-factory.js";
 import {
   ConversationReadStateService,
@@ -66,7 +72,12 @@ import {
   createGatewayTrailPort,
 } from "./ports.js";
 import { createGatewayWatchPort, type WatchFiringRecord } from "./watch-port.js";
-import { AgentService, type AgentAnswerNotification, type AgentPromptContext } from "./service.js";
+import {
+  AgentService,
+  composeAgentPromptForProfile,
+  type AgentAnswerNotification,
+  type AgentPromptContext,
+} from "./service.js";
 import { StoredConversationReader } from "./conversation-reader.js";
 import {
   buildSystemPrompt,
@@ -145,6 +156,9 @@ export interface AgentServiceDeps {
    * a gateway assembled without a config directory (tests, embedded harnesses).
    */
   getOperatorInstructions?: () => string;
+  getKnowledgeRootMaxChars?: () => number;
+  getGroundingVerifier?: (signal?: AbortSignal) => Promise<EntailCapability | null>;
+  isGroundingEnabled?: () => boolean;
 }
 
 /**
@@ -380,6 +394,7 @@ export function createAgentService(
         .map((source) => source.type),
     ),
   ];
+  const rootSnapshots = new Map<string, ReturnType<typeof captureKnowledgeRootContext>>();
   const buildLiveSystemPrompt = async (
     context: AgentPromptContext,
     options: {
@@ -401,7 +416,10 @@ export function createAgentService(
     // telling their own agent how to behave, and it applies whoever asked —
     // what may actually leave the machine is still the privacy reviewer's call.
     const operatorInstructions = deps.getOperatorInstructions?.() ?? "";
-    return buildSystemPrompt({
+    const root = restricted
+      ? { text: "", support: [] }
+      : captureKnowledgeRootContext(db, deps.getKnowledgeRootMaxChars?.());
+    const prompt = buildSystemPrompt({
       audience: options.audience,
       now: new Date(),
       timeZone: context.timeZone,
@@ -410,6 +428,7 @@ export function createAgentService(
       experimental,
       selfMemory,
       selfPersonId,
+      knowledgeRootContext: root.text,
       memoryWrites: options.memoryWrites === true && !restricted,
       temporal: !restricted,
       operatorInstructions,
@@ -418,9 +437,32 @@ export function createAgentService(
       // Source-restricted grants receive no graph context on their searches.
       graphContext: !restricted && searchPipeline.agentSearchV2Enabled,
     });
+    if (root.support.length) {
+      rootSnapshots.set(prompt, root);
+      rootSnapshots.set(composeAgentPromptForProfile(prompt, "voice"), root);
+      while (rootSnapshots.size > 256) rootSnapshots.delete(rootSnapshots.keys().next().value!);
+    }
+    return prompt;
   };
   return new AgentService({
     backendFactory,
+    ...(deps.getGroundingVerifier
+      ? {
+          grounding: {
+            getVerifier: deps.getGroundingVerifier,
+            enabled: deps.isGroundingEnabled,
+            promptSupport: (prompt: string) => {
+              const captured = rootSnapshots.get(prompt);
+              return captured
+                ? {
+                    evidence: captured.support,
+                    current: () => isCapturedKnowledgeRootSupportCurrent(db, captured),
+                  }
+                : undefined;
+            },
+          },
+        }
+      : {}),
     ports: {
       // `db` is passed so the agent search port can attach the 1-hop
       // breadcrumb to top hits when graph context is off.
@@ -476,10 +518,9 @@ export function createAgentService(
     // Source-specific knowledge (table schemas, available `source:`
     // filter values) is pulled from the registry here so nothing in the
     // prompt template knows about any individual provider.
-    // Prompt caching (cache_control: ephemeral) absorbs the per-session token
-    // cost. The rendered block varies by calendar date and by the caller's
-    // zone, so sessions opened the same day from the same place share a cached
-    // prefix; nothing in it changes faster than that.
+    // Stable built-in guidance precedes live catalog, memory, root and caller
+    // date context, preserving its prefix across session-context changes.
+    // A live session retains its prompt until a profile switch or disk resume.
     systemPrompt: (profile, context) =>
       buildLiveSystemPrompt(context, {
         audience: "interactive",
@@ -496,11 +537,14 @@ export function createAgentService(
         "lookup_document_by_url",
         "annotate_many",
       ]);
+      const groundingReads = new CitationReads();
+      const groundingDocument = createGatewayDocumentPort(db, syncStatus, undefined, authorization);
       const tools = buildBuiltinTools({
+        citationReads: groundingReads,
         experimental: false,
         ports: {
           search: createGatewaySearchPort(searchPipeline, syncStatus, db, authorization),
-          document: createGatewayDocumentPort(db, syncStatus, undefined, authorization),
+          document: groundingDocument,
           documentByUrl: createGatewayDocumentByUrlPort(db, syncStatus, authorization),
         },
       }).filter((tool) => safeNames.has(tool.name));
@@ -510,6 +554,8 @@ export function createAgentService(
       );
       return {
         tools,
+        groundingReads,
+        groundingDocument,
         systemPrompt: `${base}\n\n${renderSourceRestrictedAnswerSection(permittedSourceTypes(authorization))}`,
       };
     },
@@ -544,7 +590,7 @@ export function createAgentService(
       // edit reaches the next research stage. Generic workers get theirs
       // through `genericSystemPrompt` below, which builds the whole prompt.
       // Adjudicating specialists are the exception, for the same reason the
-      // privacy reviewer, the entailment verifier and the brief judge get
+      // privacy reviewer and the entailment verifier get
       // nothing: a bar the operator's own prose can move is not a bar.
       resolveSpecialist: (name) =>
         decorateSpecialist(
@@ -582,6 +628,8 @@ export function createAgentService(
 /** Everything {@link AgentLifecycle} needs beyond the agent's own ports. */
 export interface AgentLifecycleDeps {
   inferenceRegistry: InferenceRegistry;
+  getGroundingVerifier?: (signal?: AbortSignal) => Promise<EntailCapability | null>;
+  isGroundingEnabled?: () => boolean;
   /** Config snapshot the initial boot resolves the agent from. */
   config: ReturnType<ConfigStore["get"]>;
   /** Read fresh on each swap (assignment + credentials may have changed). */
@@ -657,16 +705,35 @@ export interface AgentLifecycleDeps {
  */
 export class AgentLifecycle {
   /**
-   * Brief talk-back session profile,
-   * installed by the Briefs feature when it boots active. Held here (not
-   * only on the AgentService) because an agent-model swap rebuilds the
-   * service, and the new instance must keep serving anchored threads.
+   * The Morning brief conversation's per-turn context. Held here (not only
+   * on the AgentService) because an agent-model swap rebuilds the service,
+   * and the new instance must keep it.
    */
-  private anchoredThreadProfile: import("./service.js").AnchoredThreadProfile | null = null;
+  private dailyBriefContext: import("./service.js").DailyBriefContextProvider | null = null;
 
-  setAnchoredThreadProfile(profile: import("./service.js").AnchoredThreadProfile | null): void {
-    this.anchoredThreadProfile = profile;
-    this.routeDeps.agentService?.setAnchoredThreadProfile(profile);
+  setDailyBriefContextProvider(
+    provider: import("./service.js").DailyBriefContextProvider | null,
+  ): void {
+    this.dailyBriefContext = provider;
+    this.routeDeps.agentService?.setDailyBriefContextProvider(provider);
+  }
+
+  /**
+   * What each morning brief was based on, for the brief route. The route
+   * deps outlive a model swap, so it is set on them directly.
+   */
+  setDailyBriefDetailReader(
+    reader: import("./daily-brief-detail.js").DailyBriefDetailReader | null,
+  ): void {
+    if (reader) this.routeDeps.dailyBriefDetail = reader;
+    else delete this.routeDeps.dailyBriefDetail;
+  }
+
+  private taskTools: import("./service.js").TaskToolsProvider | null = null;
+
+  setTaskToolsProvider(provider: import("./service.js").TaskToolsProvider | null): void {
+    this.taskTools = provider;
+    this.routeDeps.agentService?.setTaskToolsProvider(provider);
   }
 
   private interactiveMemoryProfile: import("./service.js").InteractiveWriteProfile | null = null;
@@ -869,6 +936,10 @@ export class AgentLifecycle {
     return createAgentService(
       {
         db: this.deps.db,
+        getGroundingVerifier: this.deps.getGroundingVerifier,
+        isGroundingEnabled: this.deps.isGroundingEnabled,
+        getKnowledgeRootMaxChars: () =>
+          this.deps.configStore.get().brain?.knowledge?.rootMaxChars ?? 8000,
         searchPipeline: this.deps.searchPipeline,
         syncStatus: this.deps.syncStatus,
         analyticsDb: this.deps.analyticsDb,
@@ -1151,8 +1222,9 @@ export class AgentLifecycle {
     }
 
     if (agentService) this.deps.wsEventHandler.attachAgentService(agentService);
-    if (agentService && this.anchoredThreadProfile) {
-      agentService.setAnchoredThreadProfile(this.anchoredThreadProfile);
+    if (agentService && this.taskTools) agentService.setTaskToolsProvider(this.taskTools);
+    if (agentService && this.dailyBriefContext) {
+      agentService.setDailyBriefContextProvider(this.dailyBriefContext);
     }
     if (agentService && this.interactiveMemoryProfile) {
       agentService.setInteractiveMemoryProfile(this.interactiveMemoryProfile);
@@ -1391,8 +1463,9 @@ export class AgentLifecycle {
       }
     }
 
-    if (newService && this.anchoredThreadProfile) {
-      newService.setAnchoredThreadProfile(this.anchoredThreadProfile);
+    if (newService && this.taskTools) newService.setTaskToolsProvider(this.taskTools);
+    if (newService && this.dailyBriefContext) {
+      newService.setDailyBriefContextProvider(this.dailyBriefContext);
     }
     if (newService && this.interactiveMemoryProfile) {
       newService.setInteractiveMemoryProfile(this.interactiveMemoryProfile);

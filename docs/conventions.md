@@ -944,7 +944,7 @@ Two consequences worth stating, because they are where this gets violated:
 - **A prose `reason` on the wire is addressed to a surface that can act on it.** Clients that only navigate read the booleans instead. A gate must therefore publish enough booleans to tell "this install asked for the feature and it is broken" apart from "this install merely previews it" — otherwise the client either guesses or shows a permanent false alarm on every demo gateway. `BriefsFeatureStatus.enabled` exists for exactly that.
 - **Derive the menu's state into a typed value next to the DTO, not into a branch in the view.** It keeps the blocked states distinguishable under test in the sim-less lane, where a view is not reachable.
 
-- Examples: `ios/Sources/Omnesis/Transport/BriefsClient.swift` (`BriefsMenuEntry`), `ios/Sources/Omnesis/UI/MainMenuDrawer.swift`, `android/app/src/main/kotlin/dev/omnesis/android/ui/home/MainMenuDrawer.kt`, `packages/gateway/src/brain/feature-gate.ts`
+- Examples: `ios/Sources/Omnesis/UI/MainMenuDrawer.swift` and `android/app/src/main/kotlin/dev/omnesis/android/ui/home/MainMenuDrawer.kt` (the queued-notes warning), `packages/gateway/src/brain/feature-gate.ts` (`BriefsFeatureStatus`)
 
 ### Portal tables share one vocabulary
 
@@ -1189,3 +1189,14 @@ Every rule below is documented but not machine-checked. Reviewers are expected t
 | `credentialState()` answers from the stored credential, never from a live request                                                                                                                | this doc Layer 1 + `packages/source-sdk/src/define-source.ts` JSDoc             |
 | Navigation menus mark, never explain — diagnostics live on the surface that owns the subject                                                                                                     | this doc Layer 1                                                                |
 | A separately deployed wire contract advertises a version range; no schema pins a single literal                                                                                                  | this doc Layer 1                                                                |
+
+### Source-owned evidence authority
+
+Gateway-internal sources with mixed human and generated material register an
+explicit evidence policy in `packages/gateway/src/sources/evidence-authority.ts`.
+Trusted source writers seal speaker ranges against exact body identity; ordinary
+collector metadata or rendered labels cannot mint those ranges. Shared factual
+consumers ask the registry and fail closed when a required projection is missing.
+They preserve attributed speech as indivisible witnesses and never expand a
+partial read. The semantic `evidenceAuthority` metadata digest participates in
+normal Knowledge source invalidation; its value alone does not grant authority.

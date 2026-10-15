@@ -7,7 +7,7 @@ import { h, render } from "preact";
 import { act } from "preact/test-utils";
 import { parseHTML } from "linkedom";
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { ephemeralResultArrived, MessageBubble, renderPart } from "./parts.js";
+import { ephemeralResultArrived, MessageBubble, prettyToolName, renderPart } from "./parts.js";
 
 describe("ephemeralResultArrived", () => {
   it("is false until a result lands (spinner stays, rotation parked)", () => {
@@ -771,7 +771,8 @@ describe("renderPart — after-the-fact card affordances", () => {
     const loopAnchors = [...host!.querySelectorAll("a.agent-loop-row")].map((a) =>
       a.getAttribute("href"),
     );
-    expect(loopAnchors).toEqual(["/portal/debug/cognition/loops/loop-1"]);
+    expect(loopAnchors).toEqual(["/portal/debug/cognition/knowledge/loop-1?kind=loop"]);
+    expect(host!.querySelector("a.agent-loop-row .kn-link-icon--loop")).not.toBeNull();
     await renderStatic(
       toolPart("list_loops", { kind: "structured", resultType: "loops.listed", data: { loops } }),
     );
@@ -782,7 +783,7 @@ describe("renderPart — after-the-fact card affordances", () => {
         loop: { loopId: "loop-1", title: "First loop", state: "open" },
       }),
     );
-    expect(resultLinks()).toEqual(["/portal/debug/cognition/loops/loop-1"]);
+    expect(resultLinks()).toEqual(["/portal/debug/cognition/knowledge/loop-1?kind=loop"]);
   });
 
   it("prints SQL rows statically with a more-rows note", async () => {
@@ -820,7 +821,7 @@ describe("renderPart — after-the-fact card affordances", () => {
       }),
     );
     expect(host!.querySelector("a.agent-loop-row")?.getAttribute("href")).toBe(
-      "/portal/debug/cognition/loops/loop-1",
+      "/portal/debug/cognition/knowledge/loop-1?kind=loop",
     );
     expect(host!.querySelector(".agent-ephemeral-note")?.textContent).toBe("2 retired");
     await renderStatic(
@@ -830,7 +831,7 @@ describe("renderPart — after-the-fact card affordances", () => {
         data: { loopId: "loop-1", title: "Steward loop", state: "open" },
       }),
     );
-    expect(resultLinks()).toEqual(["/portal/debug/cognition/loops/loop-1"]);
+    expect(resultLinks()).toEqual(["/portal/debug/cognition/knowledge/loop-1?kind=loop"]);
   });
 
   it("lists entity neighborhoods", async () => {
@@ -849,7 +850,7 @@ describe("renderPart — after-the-fact card affordances", () => {
     expect(resultLinks()).toEqual([
       "/portal/doc/doc-1",
       "/portal/people/person-1",
-      "/portal/debug/cognition/loops/loop-1",
+      "/portal/debug/cognition/knowledge/loop-1?kind=loop",
     ]);
     expect(host!.textContent).toContain("Near moment");
   });
@@ -971,5 +972,18 @@ describe("renderPart — after-the-fact card affordances", () => {
     expect(host!.querySelector(".agent-ephemeral-time")?.textContent).toBe("10:47 AM");
     expect(host!.textContent).not.toContain("raw-invented");
     expect(host!.querySelector('button[aria-label="Show raw JSON"]')).not.toBeNull();
+  });
+});
+
+describe("prettyToolName", () => {
+  it("names the task tools in words", () => {
+    expect(prettyToolName("task_list")).toBe("Check tasks");
+    expect(prettyToolName("task_create")).toBe("Add a task");
+    expect(prettyToolName("task_update")).toBe("Update a task");
+    expect(prettyToolName("task_undo")).toBe("Undo a task change");
+  });
+
+  it("falls back to the raw name for a tool it does not know", () => {
+    expect(prettyToolName("cite_record")).toBe("cite_record");
   });
 });
