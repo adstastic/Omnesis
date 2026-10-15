@@ -16,6 +16,16 @@ import Foundation
 actor TasksDemoGateway: TasksService {
     private var tasks: [TaskRecord]
     private var ledger: [(seq: Int, before: TaskRecord)] = []
+    /// A note saved by accepting a suggestion with a note, as the gateway's
+    /// Tell Omnesis ledger would hold it.
+    struct SavedNote: Equatable {
+        let id: String?
+        let taskId: String
+        let text: String
+    }
+
+    /// Notes saved by accepting a suggestion with a note.
+    private(set) var notes: [SavedNote] = []
     private var nextSeq = 100
     private let schedule: TaskSchedule
     /// The instant a task resolved "now" is stamped with.
@@ -32,7 +42,7 @@ actor TasksDemoGateway: TasksService {
     // MARK: - Reads
 
     func view(_ view: TaskViewKind, day: String, limit _: Int?, before _: String?) async throws -> TaskViewPage {
-        let owned = tasks.filter { !$0.isResolved && !$0.isSuggestion }
+        let owned = tasks.filter { !$0.isResolved && isMine($0) }
         let listed: [TaskRecord] = switch view {
         case .today:
             owned.filter { place($0, day: day) == .today }.map { carried($0, day: day) }
@@ -64,8 +74,14 @@ actor TasksDemoGateway: TasksService {
         let verb: String
         switch action {
         case .complete(let note):
+            // A suggestion marked done becomes one of the person's own, done.
             try require(!task.isResolved, "Task is already resolved")
-            updated = task.changed(state: .done, completionNote: .some(note), resolvedAt: .some(resolvedNow))
+            updated = task.changed(
+                state: .done,
+                accepted: task.isSuggestion ? true : nil,
+                completionNote: .some(note),
+                resolvedAt: .some(resolvedNow)
+            )
             verb = "Done"
         case .strike:
             try require(!task.isResolved, "Task is already resolved")
@@ -79,16 +95,18 @@ actor TasksDemoGateway: TasksService {
             try require(!task.isResolved, "Task is already resolved")
             updated = task.changed(scheduledFor: .some(to))
             verb = "Moved"
-        case .accept(let scheduledFor):
+        case .accept(let scheduledFor, let note, let noteId):
             try require(task.isSuggestion, "Task is already accepted")
             var plan = task.scheduledFor
             if case .set(let value) = scheduledFor { plan = value }
             updated = task.changed(accepted: true, scheduledFor: .some(plan))
-            verb = "Added"
-        case .refuse:
+            if let note { notes.append(SavedNote(id: noteId, taskId: task.id, text: note)) }
+            verb = "Added to your tasks"
+        case .ignore:
+            // The loop stays open on the gateway; only the Tasks views drop it.
             try require(task.isSuggestion, "Task is already accepted")
-            updated = task.changed(state: .dismissed, resolvedAt: .some(resolvedNow))
-            verb = "Declined"
+            updated = task.changed(ignored: true)
+            verb = "Ignored"
         case .edit(let title, _, let scheduledFor, _):
             var plan = task.scheduledFor
             if case .set(let value) = scheduledFor { plan = value }
@@ -145,7 +163,7 @@ actor TasksDemoGateway: TasksService {
     }
 
     private func counts(day: String) -> TaskCounts {
-        let owned = tasks.filter { !$0.isResolved && !$0.isSuggestion }
+        let owned = tasks.filter { !$0.isResolved && isMine($0) }
         let placed = owned.map { place($0, day: day) }
         return TaskCounts(
             today: placed.filter { $0 == .today }.count,
@@ -172,6 +190,7 @@ extension TaskRecord {
         title: String? = nil,
         state: State? = nil,
         accepted: Bool? = nil,
+        ignored: Bool? = nil,
         scheduledFor: String?? = nil,
         carried: Bool? = nil,
         completionNote: String?? = nil,
@@ -185,6 +204,7 @@ extension TaskRecord {
             state: state ?? self.state ?? .open,
             origin: origin ?? .user,
             accepted: accepted ?? self.accepted,
+            ignored: ignored ?? self.ignored,
             scheduledFor: scheduledFor ?? self.scheduledFor,
             deadline: deadline,
             dueDay: dueDay,
