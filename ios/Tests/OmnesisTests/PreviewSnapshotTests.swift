@@ -3837,6 +3837,24 @@ final class PreviewSnapshotTests: XCTestCase {
         snapshot(view, name: "78-agent-ephemeral-document-slot")
     }
 
+    func testAgentEphemeralWikiRead() {
+        let store = AppStore.preview(agentPreview: .init())
+        for (call, index, name) in [
+            (PreviewMocks.agentToolCallWikiReadRunning, nil as Int?, "78c-agent-ephemeral-wiki-running"),
+            (PreviewMocks.agentToolCallWikiReadComplete, 1, "78d-agent-ephemeral-wiki-slot"),
+        ] {
+            let view = NavigationStack {
+                ScrollView {
+                    AgentEphemeralDocumentCard(call: call, initialIndex: index, freeze: true)
+                        .padding()
+                }
+                .background(Theme.bgPrimary)
+            }
+            .environment(store)
+            snapshot(view, name: name)
+        }
+    }
+
     func testAgentEphemeralPeopleSlot() {
         let store = AppStore.preview(agentPreview: .init())
         let view = NavigationStack {
