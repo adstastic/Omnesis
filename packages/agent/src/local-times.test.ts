@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   annotateLocalTimes,
+  instantSafeEnd,
+  withoutCutInstantAtEnd,
   stripLocalTimeAnnotations,
   stripLocalTimeAnnotationsDeep,
 } from "./local-times.js";
@@ -133,5 +135,50 @@ describe("stripLocalTimeAnnotationsDeep", () => {
     );
     expect(annotated).not.toEqual(stored);
     expect(stripLocalTimeAnnotationsDeep(annotated)).toEqual(stored);
+  });
+});
+
+describe("instantSafeEnd", () => {
+  const text = "Doors open 2026-10-18T17:28:00.000+01:00 at the hall";
+  const at = text.indexOf("2026");
+  const after = at + "2026-10-18T17:28:00.000+01:00".length;
+
+  it("moves a cut inside an instant to just before it", () => {
+    for (const end of [at + 1, at + 16, after - 1]) expect(instantSafeEnd(text, 0, end)).toBe(at);
+  });
+
+  it("leaves a cut outside any instant, at its edges, or past the text where it is", () => {
+    for (const end of [at - 3, at, after, after + 4, text.length + 10]) {
+      expect(instantSafeEnd(text, 0, end)).toBe(end);
+    }
+  });
+
+  it("keeps the cut when the slice starts on the instant and cannot hold it", () => {
+    expect(instantSafeEnd(text, at, at + 10)).toBe(at + 10);
+  });
+});
+
+describe("withoutCutInstantAtEnd", () => {
+  it("drops a date and time a cut left without its offset", () => {
+    expect(withoutCutInstantAtEnd("Doors open 2026-10-18T17:28")).toBe("Doors open ");
+    expect(withoutCutInstantAtEnd("Doors open 2026-10-18T17:28:0")).toBe("Doors open ");
+  });
+
+  it("keeps a whole instant, a date, and text that does not end on one", () => {
+    for (const text of [
+      "Doors 2026-10-18T17:28:00Z",
+      "Due 2026-10-18",
+      "At 2026-10-18T17:28 sharp",
+    ]) {
+      expect(withoutCutInstantAtEnd(text)).toBe(text);
+    }
+  });
+});
+
+describe("offset bounds", () => {
+  it("does not read a clock range as an instant with an impossible offset", () => {
+    expect(annotateLocalTimes("Slot 2026-10-18T17:28-18:30 booked", LONDON)).toBe(
+      "Slot 2026-10-18T17:28-18:30 booked",
+    );
   });
 });

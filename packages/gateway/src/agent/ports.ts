@@ -17,11 +17,13 @@
 
 import { createHash } from "node:crypto";
 import {
+  instantSafeEnd,
   LOOKUP_PEOPLE_MAX_LIMIT,
   RecordPortError,
   SqlPortNotPermittedError,
   SqlPortOverCapError,
   UnsupportedSearchFilterError,
+  withoutCutInstantAtEnd,
 } from "@omnesis/agent";
 import {
   deriveRecordCitationFields,
@@ -332,6 +334,11 @@ function attachDocConnections(db: Db, results: DocRef[]): void {
   }
 }
 
+/** A document's first 500 characters, ending before an instant the cut would split. */
+function snippetOf(content: string): string {
+  return content.slice(0, instantSafeEnd(content, 0, 500));
+}
+
 function searchResultToDocRef(
   item: SearchResultItem,
   syncStatus: SyncStatusRegistry | undefined,
@@ -343,7 +350,8 @@ function searchResultToDocRef(
     sourceId: item.sourceId,
     documentType: item.documentType,
     title: item.title,
-    snippet: item.chunkText,
+    // A fixed-width chunk can end partway through an instant.
+    snippet: withoutCutInstantAtEnd(item.chunkText),
     ts: parseEpochMillis(item.sourceCreatedAt),
     url: item.sourceUrl,
     appUrl: item.appUrl,
@@ -495,7 +503,7 @@ export function createGatewayDocumentPort(
           sourceId: row.sourceId,
           documentType,
           title: row.title,
-          snippet: row.content.slice(0, 500),
+          snippet: snippetOf(row.content),
           ts: parseEpochMillis(row.sourceCreatedAt),
           url,
           appUrl,
@@ -652,7 +660,7 @@ export function createGatewayDocumentByUrlPort(
         sourceId: row.sourceId,
         documentType,
         title: row.title,
-        snippet: row.content.slice(0, 500),
+        snippet: snippetOf(row.content),
         ts: parseEpochMillis(row.sourceCreatedAt),
         url: sourceUrl,
         appUrl,
