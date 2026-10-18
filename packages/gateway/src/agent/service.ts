@@ -28,6 +28,7 @@ import {
   createLogger,
   InferenceUrlPolicyError,
   experimentalVisible,
+  hostTimeZone,
   makeEvent,
   type AgentConversationTerminalFailure,
   type AgentEvent,
@@ -551,7 +552,7 @@ const ANSWER_CITATIONS_PROMPT = `
 
 # Citations on the answer surface
 
-After privacy review, the documents you cite leave Omnesis beside your text as structured citations: each carries the document's title, date, source and the links the user can open. The external agent uses them to point the user at the source, so cite with \`annotate_many\`, one \`{ documentId }\` item per document your answer relies on, all in one call, before you write the answer. Write the answer itself as your final text, after your last tool call other than \`annotate_many\`. Anything you write before any other tool call is not part of the answer, but everything you write on either side of \`annotate_many\` is, so write nothing there that you would not send as the answer. Copy each \`documentId\` from a \`search_many\`, \`fetch_many\` or \`lookup_document_by_url\` result. ${CITATION_GROUNDING} Cite every document a claim rests on and nothing else: a citation discloses that its document exists. Quotes and notes on a citation are not released. Omit notes; include an exact quote when citing a bounded partial read. Citation recording requires a current document snapshot explicitly fetched this turn; batch unread sources through fetch_many before annotate_many. You may cite a fetched synthesis page directly without opening every underlying source.
+After privacy review, the documents you cite leave Omnesis beside your text as structured citations: each carries the document's title, date, source and the links the user can open. The external agent uses them to point the user at the source, so cite with \`annotate_many\`, one \`{ documentId }\` item per document your answer relies on, all in one call, before you write the answer. Write the answer itself as your final text, after your last tool call other than \`annotate_many\`. Anything you write before any other tool call is not part of the answer, but everything you write on either side of \`annotate_many\` is, so write nothing there that you would not send as the answer. Copy each \`documentId\` from a \`search_many\`, \`fetch_many\` or \`lookup_document_by_url\` result. ${CITATION_GROUNDING} Cite every document a claim rests on and nothing else: a citation discloses that its document exists. Quotes and notes on a citation are not released. Omit notes. You may cite a synthesis page directly without opening every underlying source.
 
 Use returned structured citations only; do not invent inline citation markers or search-result identifiers. Never write a URL or a document id in your text, even when the question asks for links. The caller receives each cited document's real links through its citation; a link you compose yourself is a guess, and a wrong one. When links are asked for, cite the documents and say in words which ones they are.`;
 
@@ -1492,9 +1493,12 @@ export class AgentService {
     const experimental =
       this.interactiveWriteProfile && experimentalVisible()
         ? adaptInteractiveKnowledgeReads(
-            this.interactiveWriteProfile
-              .buildOwnTools(`interactive_${sessionId}`)
-              .filter((tool) => !RUN_LOOP_WRITE_TOOLS.has(tool.name)),
+            this.interactiveWriteProfile.buildOwnTools(`interactive_${sessionId}`).filter(
+              (tool) =>
+                !RUN_LOOP_WRITE_TOOLS.has(tool.name) &&
+                // Conversations read maintained pages; only the Brain writes them.
+                !(tool.name.startsWith("knowledge_") && tool.mutates === true),
+            ),
             this.tools,
             this.documentPort.supportsKnowledgeAliases === true,
             this.documentPort.knowledgePageRef?.bind(this.documentPort),
@@ -1718,6 +1722,7 @@ export class AgentService {
         record.origin,
         options.limit,
         options.before,
+        record.unrecognizedSeedMessageCount,
       ),
       model: record.model,
       backend: record.backend,
@@ -2568,6 +2573,10 @@ export class AgentService {
         ? `${basePrompt}${FIRING_EVIDENCE_ANSWER_PROMPT}${ANSWER_CITATIONS_PROMPT}`
         : `${basePrompt}${READ_ONLY_ANSWER_PROMPT}${ANSWER_CITATIONS_PROMPT}`,
       initialHistory,
+      // The prompt's default zone: tool results then carry each instant's
+      // local time beside it, so the model reads clock times instead of
+      // converting UTC by hand.
+      timeZone: hostTimeZone(),
       // An Answer is a task: its caller waits on the task, not on each token,
       // so a quota that resets in a minute should delay it rather than fail it.
       rateLimitPatience: BACKGROUND_RATE_LIMIT_PATIENCE,
@@ -2788,7 +2797,15 @@ export class AgentService {
     });
     let started: ReturnType<AgentSession["send"]>;
     try {
-      const modelNote = this.namedPagesNote?.(text);
+      // A hint only: a failure to name pages must never fail the user's send.
+      let modelNote = "";
+      try {
+        modelNote = this.namedPagesNote?.(text) ?? "";
+      } catch (err) {
+        log.warn(
+          `named pages note failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       started = entry.session.send(text, {
         signal: opts.signal,
         ...(modelNote ? { modelNote } : {}),
@@ -3663,11 +3680,13 @@ export function paginateVisibleConversationMessages(
   origin: ConversationOrigin | undefined,
   limit: number,
   before?: number,
+  /** Seed of an origin this gateway no longer recognizes; hidden all the same. */
+  unrecognizedSeed = 0,
 ): Omit<
   ConversationMessagePage,
   "model" | "backend" | "origin" | "terminalFailure" | "lastTurnFailure"
 > {
-  const seed = origin?.kind === "watch_firing" ? (origin.seedMessageCount ?? 0) : 0;
+  const seed = origin?.kind === "watch_firing" ? (origin.seedMessageCount ?? 0) : unrecognizedSeed;
   const seedMessageCount = Math.min(messages.length, Math.max(0, seed));
   const visible = messages.slice(seedMessageCount);
   const safeLimit = Math.max(0, Math.floor(limit));
