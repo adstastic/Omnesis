@@ -3187,6 +3187,9 @@ const inferenceAssignmentsObject = z
     // from `agent`: selecting a reviewer must never change the conversational
     // model assignment, and an omitted reviewer fails closed at the gate.
     "privacy-reviewer": assignmentValue.optional(),
+    // Speech-to-text. A catalog Whisper model id (run in-process through
+    // whisper.cpp), `"<httpBackend>/<model>"` (an OpenAI-compatible
+    // transcription server, such as a GPU whisper server), or `"replay"`.
     transcriber: assignmentValue.optional(),
     // OCR. Besides `"<httpBackend>/<model>"` (a vLLM / llama-server
     // vision model) and `"replay"`, accepts the built-in runtimes
@@ -3415,7 +3418,7 @@ const inference = z
     allowRemoteInference: z
       .boolean()
       .describe(
-        "Permit HTTP inference backends whose resolved address is not loopback. Off by default so document chunks, queries, prompts, and OCR images stay local unless explicitly opted in.",
+        "Permit HTTP inference backends whose resolved address is not loopback. Off by default so document chunks, queries, prompts, OCR images, and recorded audio stay local unless explicitly opted in.",
       )
       .optional(),
     codex: z
