@@ -58,6 +58,8 @@ import {
 import { bootDateEnrichment } from "./enrichment/dates/task.js";
 import { renderDailyBriefContext } from "./brain/observations/brief-thread-context.js";
 import { readDailyBriefDetail } from "./brain/observations/brief-detail.js";
+import { createBriefItemReactor } from "./brain/observations/brief-reactions.js";
+import { InterestEngine } from "./brain/interest/engine.js";
 import { buildTaskTools } from "./brain/tasks/tools.js";
 import { TaskService, type TaskEffects } from "./brain/tasks/service.js";
 import { createOpenLoopMirror } from "./brain/steward/mirror.js";
@@ -2328,14 +2330,42 @@ const httpShutdown = new GatewayHttpShutdown();
 // What follows a task change, wherever it is made: the searchable loop mirror
 // (only while the Brain runs, which seeds its source), retracting scheduled
 // checks and dropping observations about a resolved task.
+// The interest engine: the owner's reactions (tasks accepted, created or
+// ignored; thumbs on brief items; what they say in the Morning brief
+// conversation) as examples the decision gates compare new items against.
+// Constructed before the server because the brief-item reaction route, the
+// Debug → Cognition tab and the Brain's gates all read it.
+const interestEngine = new InterestEngine({
+  db,
+  writeGate,
+  getEmbedder: () => {
+    const embedder = getSemanticEmbedder();
+    if (!embedder) return null;
+    // The model the live index was built with is the one answering queries,
+    // also while a replacement is still being built.
+    const modelId = getIndexEmbedModel(indexDb)?.name;
+    return modelId ? { modelId, embedQuery: embedder.embedQuery } : null;
+  },
+  // Only the Brain's gates read the ledger, and they exist in experimental
+  // mode; a stable gateway records nothing.
+  enabled: () =>
+    experimentalVisible() && resolveBrainSettings(configStore.get().brain).interest.enabled,
+  lookupOptions: () => resolveBrainSettings(configStore.get().brain).interest.lookup,
+  clock: briefsVirtualClock ?? Date.now,
+  idGen: () => globalThis.crypto.randomUUID(),
+  log: log.child("interest"),
+});
+
 const taskEffects: TaskEffects = {
   writeGate,
   ...(experimentalEnabled()
     ? { mirror: createOpenLoopMirror({ db, writeGate, log: log.child("task-mirror") }) }
     : {}),
+  interestEnabled: () => interestEngine.enabled(),
 };
 const taskService = new TaskService(db, writeGate, briefsVirtualClock ?? Date.now, taskEffects);
 const app = createServer(db, DB_PATH, {
+  interest: interestEngine,
   taskEffects,
   getDiskUsage: () => diskUsage.snapshot(),
   requestAdmission: (_c, next) => Promise.resolve(httpShutdown.guard(next)),
@@ -2727,7 +2757,7 @@ scheduler.schedule({
     }
   },
 });
-agentLifecycle.setTaskToolsProvider((conversationId) =>
+agentLifecycle.setTaskToolsProvider((conversationId, context) =>
   buildTaskTools({
     db,
     tasks: taskService,
@@ -2738,9 +2768,52 @@ agentLifecycle.setTaskToolsProvider((conversationId) =>
       conversationId,
     },
     observations: experimentalVisible(),
+    // Only the Morning brief conversation records what the owner says they
+    // care about; elsewhere their words are not feedback on a brief.
+    ...(context.originKind === "daily_brief" ? { interest: interestEngine } : {}),
     ...(briefsVirtualClock ? { clock: briefsVirtualClock } : {}),
   }),
 );
+// Thumbs on a shipped brief item: the reaction, its interest signal and, for
+// a factual correction, the Tell Omnesis note it becomes.
+agentLifecycle.setBriefItemReactor(
+  createBriefItemReactor({
+    db,
+    writeGate,
+    interest: interestEngine,
+    notes: () => omnesisNotesRuntime,
+    clock: briefsVirtualClock ?? Date.now,
+    log: log.child("interest"),
+  }),
+);
+// Vectors for new interest signals, off the request that recorded them.
+const interestEmbedTask: PeriodicTask<undefined, undefined> = {
+  name: "interest.embedBacklog",
+  runner: "main",
+  priority: "background",
+  periodMs: 15_000,
+  idlePeriodMs: 120_000,
+  startDelayMs: 20_000,
+  latencyBudgetMs: 60_000,
+  initialArgs: undefined,
+  isIdle: () => !interestEngine.hasBacklog(),
+  async run() {
+    // An embedding pass waits on the embedder: run it off the scheduler's runner.
+    if (interestEngine.hasBacklog()) interestEngine.kick();
+    return { kind: "done", value: undefined };
+  },
+};
+scheduler.schedule(interestEmbedTask);
+backgroundJobs.registerAll([
+  periodicJob(interestEmbedTask, {
+    scheduler,
+    displayName: "Interest ledger",
+    description: "Embed the owner's recent reactions so the Brain's gates can find similar ones.",
+    isDisabled: () => !interestEngine.enabled(),
+    category: "briefs",
+    tracker: new StatelessTracker(),
+  }),
+]);
 subscribeMemoryInvalidators({
   db,
   writeGate,
@@ -2769,6 +2842,7 @@ await bootBriefs({
     activeDerivationStages,
     resolveBackend: resolveBackgroundAgentBackend,
     getDecision: () => decisionService.get(),
+    interest: interestEngine,
     getOperatorInstructions: () => operatorInstructions.promptText(),
     transcriptsDir: cognitionTranscriptsDir(configDir),
     // Collaborators the Cognition Steward's toolset + prompts are assembled from

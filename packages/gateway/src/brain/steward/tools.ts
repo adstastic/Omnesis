@@ -127,9 +127,12 @@ import {
   type TaskEvidenceVerdict,
 } from "../tasks/auto-apply.js";
 import { TASK_NOTE_HISTORY, type TaskChecks } from "../tasks/task-checks.js";
+import { isWithheldSuggestion } from "../storage/interest.js";
 import { jointContextualEvidence } from "./annotation-gate-evidence.js";
 import { assessPersonWithdrawal } from "./person-withdrawal.js";
 import { PersonProfileReads } from "./person-profile-reads.js";
+import type { TaskProposeGate, TaskProposeVerdict } from "../tasks/task-propose.js";
+import type { InterestLookup } from "../interest/engine.js";
 import type { ObservationScoringInput, ObservationScoringResult } from "../observations/noting.js";
 import type { ConsumedAnnotationRef, RunConsumptionTracker } from "./consumption.js";
 import type { IdentityCandidate } from "../reconcile/identity-candidates.js";
@@ -141,7 +144,7 @@ import type {
   TemporalPrecision,
   ToolResult,
 } from "@omnesis/core";
-import type { SearchPort, TemporalReadPort, ToolHandle } from "@omnesis/agent";
+import type { SearchPort, TemporalReadPort, ToolContext, ToolHandle } from "@omnesis/agent";
 import type { WriteGate } from "../../write-gate.js";
 import type { OpenLoopMirror } from "./mirror.js";
 import type { CheckRecord, RecordCheckInput } from "../record-check/check.js";
@@ -315,6 +318,17 @@ export interface CognitionToolDeps {
    * a note adds anything to the task's history. Absent, neither runs.
    */
   taskChecks?: TaskChecks;
+  /**
+   * The gate on new suggestions (`open_loop_create`): from the owner's past
+   * reactions, whether a suggestion is adopted as their task at once, offered,
+   * or withheld. Absent, every suggestion is offered.
+   */
+  taskPropose?: TaskProposeGate;
+  /**
+   * The owner's past reactions, read by the gates on tasks. Absent, they
+   * judge without them.
+   */
+  interest?: InterestLookup;
   /**
    * Per-run surfaced-prior tracker (consumption provenance). Search results,
    * prompt-inlined priors and self-memory become candidates that a later
@@ -1049,10 +1063,15 @@ function loopToModelJson(
     // The user's own task: its state, title, description and deadline change
     // only by proposal (open_loop_update records one for the user to confirm).
     userTask: isOwnedTask(loop),
-    // The user chose not to see this suggestion among their tasks; the loop
-    // is still the Brain's to maintain, and must not be re-created to put it
-    // back in front of them.
-    ...(loop.ignored ? { ignoredByUser: true } : {}),
+    // Out of the user's Tasks views, either because they chose not to keep
+    // the suggestion or because the suggestion gate withheld it before they
+    // saw it. Either way the loop is still the Brain's to maintain, and must
+    // not be re-created to put it back in front of them.
+    ...(loop.ignored
+      ? isWithheldSuggestion(db, loop.id)
+        ? { withheldByGate: true }
+        : { ignoredByUser: true }
+      : {}),
     ...(loop.scheduledFor ? { scheduledFor: loop.scheduledFor } : {}),
     ...(loop.proposedChange
       ? { pendingProposal: { kind: loop.proposedChange.kind, reason: loop.proposedChange.reason } }
@@ -1404,6 +1423,34 @@ export function buildCognitionOwnTools(deps: CognitionToolDeps): ToolHandle[] {
     },
   };
 
+  /**
+   * The suggestion gate's tier for a loop about to be created. The gate fails
+   * open on its own; this guards the tool against anything else, so a
+   * suggestion is never lost to the gate. Only the run's cancellation passes.
+   */
+  async function judgeProposal(
+    loopId: string,
+    title: string,
+    description: string,
+    docIds: readonly string[],
+    ctx: ToolContext,
+  ): Promise<TaskProposeVerdict> {
+    const offered: TaskProposeVerdict = { tier: "suggest", enforced: false, reason: "" };
+    if (!deps.taskPropose) return offered;
+    try {
+      return await deps.taskPropose.judge(
+        { runId, loopId, documentId: docIds[0] ?? null, title, description },
+        ctx.abortSignal,
+      );
+    } catch (error) {
+      if (ctx.abortSignal?.aborted) throw error;
+      log.warn(
+        `Suggestion gate failed for ${loopId}; suggesting: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return offered;
+    }
+  }
+
   // ---- open_loop_create ----
   const openLoopCreateSchema = z
     .object({
@@ -1490,6 +1537,7 @@ export function buildCognitionOwnTools(deps: CognitionToolDeps): ToolHandle[] {
         outcomeFence,
       );
       if (refused) return refused;
+      const proposal = await judgeProposal(id, a.title, a.description ?? "", docs.known, ctx);
       const persisted = await writeGate.createOpenLoop(
         {
           id,
@@ -1503,6 +1551,9 @@ export function buildCognitionOwnTools(deps: CognitionToolDeps): ToolHandle[] {
           involved: involved.known,
           docs: docs.known,
           blockedBy: blockedBy.known,
+          ...(proposal.enforced && proposal.tier !== "suggest"
+            ? { proposal: { tier: proposal.tier, note: proposal.reason } }
+            : {}),
         },
         { ...dependencyContext(dependencies.refs), outcomeFence },
         clock(),
@@ -1522,6 +1573,9 @@ export function buildCognitionOwnTools(deps: CognitionToolDeps): ToolHandle[] {
       log.info(`Cognition Steward run ${runId} created open loop ${id}: ${a.title}`);
       return ok("open_loop.created", {
         loop: loopToModelJson(db, loop, { ledger: false }),
+        // Only an enforced verdict is the model's business: it says whether
+        // the owner will see the loop. A recorded-only verdict is audit data.
+        ...(proposal.enforced && proposal.tier !== "suggest" ? { gate: proposal.tier } : {}),
         ...(docs.dropped.length > 0 ? { droppedDocIds: docs.dropped } : {}),
         ...(blockedBy.dropped.length > 0 ? { droppedBlockedByIds: blockedBy.dropped } : {}),
         ...(actors.dropped.length > 0 ? { droppedActors: actors.dropped } : {}),

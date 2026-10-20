@@ -14,6 +14,7 @@
 import { observationSources, recordSalienceDecision, salienceDecisionCapture } from "./recheck.js";
 import {
   judgeSalience,
+  salienceInterestQuery,
   salienceVerdict,
   wouldHavePushed,
   type SalienceThresholds,
@@ -21,6 +22,7 @@ import {
 import type { DecisionCapability, Logger } from "@omnesis/core";
 import type { CognitionDecisionRecord } from "../storage/decisions.js";
 import type { ObservationScores } from "../storage/types.js";
+import type { InterestLookup } from "../interest/engine.js";
 import type Database from "better-sqlite3";
 
 export interface ObservationScoringInput {
@@ -47,6 +49,8 @@ export interface ObservationScorerDeps {
   thresholds: () => SalienceThresholds;
   /** When the next morning brief is due, measured from `now`. */
   nextBriefAt: (now: number) => number;
+  /** The owner's past reactions, shown to the salience gate. Omitted, it judges without them. */
+  interest?: InterestLookup;
   log: Logger;
 }
 
@@ -62,6 +66,9 @@ export function createObservationScorer(
       id: input.id,
       citations: [...input.citations],
     });
+    const ownerInterest = deps.interest
+      ? await deps.interest.lookup({ text: salienceInterestQuery(input) })
+      : null;
     const judged = await judgeSalience(
       decision,
       {
@@ -72,6 +79,7 @@ export function createObservationScorer(
         windowStart: input.windowStart,
         relevantUntil: input.relevantUntil,
         sources: observationSources(deps.db, input.citations),
+        ownerInterest,
       },
       input.notedAt,
       { recordSpend: deps.recordSpend, log: deps.log },

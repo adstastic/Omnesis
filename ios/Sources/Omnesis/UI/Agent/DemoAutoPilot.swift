@@ -29,11 +29,15 @@ struct DemoAutoPilot: ViewModifier {
     @State private var postResponseTrigger = 0
 
     private static let enabled = ProcessInfo.processInfo.environment["DEMO_AUTO_SEND"] != nil
+    /// The prompt to send, passed by the recording test so it skips slow
+    /// keyboard interaction.
+    private static let prompt = (ProcessInfo.processInfo.environment["DEMO_PROMPT"] ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
 
     func body(content: Content) -> some View {
         content
             .task {
-                guard Self.enabled, !sent else { return }
+                guard Self.enabled, !sent, !Self.prompt.isEmpty else { return }
 
                 // Wait for the paired transport; blank conversations mint a session on send.
                 for _ in 0 ..< 75 {
@@ -52,6 +56,8 @@ struct DemoAutoPilot: ViewModifier {
                 // minted lazily by the send() below.
                 store.agent.newConversation()
                 citationsOpen = false
+                // Shown in the composer for the viewer to read before it is sent.
+                composerText = Self.prompt
 
                 // When a screen recorder is driving us (record-demos.sh),
                 // wait until it signals that simctl's recordVideo is actually
@@ -74,13 +80,9 @@ struct DemoAutoPilot: ViewModifier {
                 // (the viewer reads it) rather than on the agent's reply.
                 try? await Task.sleep(for: .seconds(1))
 
-                let prompt = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !prompt.isEmpty else { return }
-
-                composerText = ""
                 sent = true
                 waitingForResponse = true
-                await store.agent.send(text: prompt)
+                await store.agent.sendComposerDraft(Self.prompt)
             }
             .onChange(of: store.agent.busy) { _, isBusy in
                 guard waitingForResponse, !isBusy else { return }

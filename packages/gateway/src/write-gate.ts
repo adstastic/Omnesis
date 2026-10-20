@@ -4,6 +4,18 @@
 import { upsertConversationDocument } from "./sources/omnesis-chat/document-writer.js";
 import { clearMorningBriefMessageItems } from "./brain/storage/morning-brief-items.js";
 import {
+  applyBriefReaction,
+  recordInterestSignal,
+  resetInterestEmbeddingsNotFrom,
+  setInterestSignalEmbedding,
+  supersedeInterestSignals,
+  type ApplyBriefReactionInput,
+  type BriefItemReaction,
+  type InterestSignal,
+  type InterestSupersedeScope,
+  type NewInterestSignal,
+} from "./brain/storage/interest.js";
+import {
   claimDueNote,
   enqueueNewNotes,
   finishNoteRun,
@@ -14,6 +26,7 @@ import {
   autoApplyTaskChange,
   withdrawTaskProposal,
   proposeTaskChange,
+  type ApplyTaskCommandOptions,
   type AutoAppliedTaskChange,
   type AutoApplyTaskResult,
   type TaskCommand,
@@ -31,7 +44,6 @@ import {
   type PersonProfileBudget,
 } from "./brain/storage/person-annotations.js";
 import { KnowledgeStorageError } from "./brain/knowledge/types.js";
-import type { KnowledgeCanonicalFence } from "./brain/knowledge/canonical-fence.js";
 import { withdrawKnowledgeOwner } from "./brain/knowledge/owner-withdrawal.js";
 
 import {
@@ -2005,9 +2017,36 @@ export interface WriteGate extends KnowledgeWriteGate {
   expireObservations(now: number): Promise<string[]>;
   /** Drop a resolved loop's open observations unless another related loop is active. */
   dropObservationsForResolvedLoop(loopId: string, now: number): Promise<string[]>;
-  setObservationUserAction(id: string, userAction: string, now: number): Promise<boolean>;
+  setObservationUserAction(id: string, userAction: string | null, now: number): Promise<boolean>;
   /** Apply one user task command (create, complete, migrate, strike, edit, accept, undo, …). */
-  applyTaskCommand(command: TaskCommand, now: number): Promise<TaskCommandResult>;
+  applyTaskCommand(
+    command: TaskCommand,
+    now: number,
+    opts?: ApplyTaskCommandOptions,
+  ): Promise<TaskCommandResult>;
+  /**
+   * Record one interest signal, superseding the live signals `supersede`
+   * names first, in one transaction.
+   */
+  recordInterestSignal(
+    signal: NewInterestSignal,
+    supersede: InterestSupersedeScope | null,
+  ): Promise<InterestSignal>;
+  /** Mark the live interest signals a scope names as superseded. */
+  supersedeInterestSignals(by: InterestSupersedeScope, now: number): Promise<number>;
+  /** Store a signal's vector, or record a failed attempt (null) and back off its next try. */
+  setInterestSignalEmbedding(
+    id: string,
+    embedding: { vector: ArrayLike<number>; model: string } | null,
+    now: number,
+  ): Promise<boolean>;
+  /** Forget vectors made by any embedder but `model`, so they are re-embedded. */
+  resetInterestEmbeddingsNotFrom(model: string): Promise<number>;
+  /** Apply the owner's thumbs on one shipped brief item: signal, row and user action, atomically. */
+  setBriefItemReaction(
+    input: ApplyBriefReactionInput,
+    now: number,
+  ): Promise<BriefItemReaction | null>;
   /** Record a Brain proposal on one of the user's own tasks. */
   proposeTaskChange(loopId: string, proposal: ProposedTaskChange, now: number): Promise<boolean>;
   /** Apply a verified Brain change to one of the user's own tasks, as an undoable event. */
@@ -2204,6 +2243,7 @@ import {
   type WriterOpName,
   type WriterReturn,
 } from "./scheduler/writer-handlers.js";
+import type { KnowledgeCanonicalFence } from "./brain/knowledge/canonical-fence.js";
 import type { AccountDescriptor, SourceSyncMeta, SyncCursor } from "@omnesis/source-sdk";
 import type Database from "better-sqlite3";
 /**
@@ -2768,7 +2808,13 @@ export function writeGateFromCall(call: WriterCallFn): WriteGate {
       call("cognition.observationDropForLoop", [loopId, now]),
     setObservationUserAction: (id, userAction, now) =>
       call("cognition.observationUserAction", [id, userAction, now]),
-    applyTaskCommand: (command, now) => call("cognition.taskCommand", [command, now]),
+    applyTaskCommand: (command, now, opts) => call("cognition.taskCommand", [command, now, opts]),
+    recordInterestSignal: (signal, supersede) => call("interest.record", [signal, supersede]),
+    supersedeInterestSignals: (by, now) => call("interest.supersede", [by, now]),
+    setInterestSignalEmbedding: (id, embedding, now) =>
+      call("interest.embedding", [id, embedding, now]),
+    resetInterestEmbeddingsNotFrom: (model) => call("interest.resetEmbeddings", [model]),
+    setBriefItemReaction: (input, now) => call("interest.reaction", [input, now]),
     enqueueNewNotes: (now) => call("noteAgent.enqueue", [now]),
     clearMorningBriefMessageItems: (messageId) =>
       call("cognition.morningBriefItemsClear", [messageId]),
@@ -3460,7 +3506,13 @@ export function directWriteGate(db: Db): WriteGate {
       dropObservationsForResolvedLoop(db, loopId, now),
     setObservationUserAction: async (id, userAction, now) =>
       setObservationUserAction(db, id, userAction, now),
-    applyTaskCommand: async (command, now) => applyTaskCommand(db, command, now),
+    applyTaskCommand: async (command, now, opts) => applyTaskCommand(db, command, now, opts),
+    recordInterestSignal: async (signal, supersede) => recordInterestSignal(db, signal, supersede),
+    supersedeInterestSignals: async (by, now) => supersedeInterestSignals(db, by, now),
+    setInterestSignalEmbedding: async (id, embedding, now) =>
+      setInterestSignalEmbedding(db, id, embedding, now),
+    resetInterestEmbeddingsNotFrom: async (model) => resetInterestEmbeddingsNotFrom(db, model),
+    setBriefItemReaction: async (input, now) => applyBriefReaction(db, input, now),
     enqueueNewNotes: async (now) => enqueueNewNotes(db, now),
     clearMorningBriefMessageItems: async (messageId) =>
       clearMorningBriefMessageItems(db, messageId),

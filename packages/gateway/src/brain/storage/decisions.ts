@@ -40,7 +40,8 @@ export type DecisionVerdict = "pass" | "skip" | "unavailable";
  * What a decision was asked for: `worth-gate` judges a run's document before
  * the run, `record-check` a record a run is about to save,
  * `observation-salience` whether an observation belongs in a morning brief,
- * `task-check` a Brain write to one of the user's own tasks, `mention-worth`
+ * `task-check` a Brain write to one of the user's own tasks, `task-propose`
+ * whether a new Brain suggestion is withheld, suggested or adopted, `mention-worth`
  * whether an email's date mentions are worth recording, and `find-route`
  * whether a search needs agent research.
  */
@@ -49,6 +50,7 @@ export type DecisionPurpose =
   | "record-check"
   | "observation-salience"
   | "task-check"
+  | "task-propose"
   | "mention-worth"
   | "find-route";
 
@@ -58,6 +60,7 @@ export const DECISION_PURPOSES: readonly DecisionPurpose[] = [
   "record-check",
   "observation-salience",
   "task-check",
+  "task-propose",
   "mention-worth",
   "find-route",
 ];
@@ -166,6 +169,8 @@ const COGNITION_DECISIONS_INDEXES = [
   "CREATE INDEX IF NOT EXISTS idx_cognition_decisions_created ON cognition_decisions(created_at)",
   // A Brain record's own judgements (an observation's salience history).
   "CREATE INDEX IF NOT EXISTS idx_cognition_decisions_record ON cognition_decisions(record_id, purpose, created_at DESC) WHERE record_id IS NOT NULL",
+  // One purpose's newest judgements across every record (the Interest tab's gate verdicts).
+  "CREATE INDEX IF NOT EXISTS idx_cognition_decisions_purpose ON cognition_decisions(purpose, created_at DESC)",
 ];
 
 interface DecisionRow {
@@ -304,6 +309,21 @@ export function listDecisionsForRun(db: Db, runId: string): CognitionDecisionRec
 }
 
 /** The latest decisions of one purpose about one Brain record, newest first. */
+/** The newest rows of one purpose across every record, newest first. */
+export function listDecisionsForPurpose(
+  db: Db,
+  purpose: DecisionPurpose,
+  limit: number,
+): CognitionDecisionRecord[] {
+  return db
+    .prepare<[DecisionPurpose, number], DecisionRow>(
+      `SELECT * FROM cognition_decisions WHERE purpose = ?
+        ORDER BY created_at DESC, id LIMIT ?`,
+    )
+    .all(purpose, limit)
+    .map(fromRow);
+}
+
 export function listDecisionsForRecord(
   db: Db,
   purpose: DecisionPurpose,
