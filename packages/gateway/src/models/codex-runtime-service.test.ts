@@ -596,9 +596,9 @@ describe("CodexRuntimeService parsers", () => {
       await service.logout();
 
       const setup = service.setupAgent(configStore, "gpt-example-frontier");
+      const setupRejected = expect(setup).rejects.toBeInstanceOf(AgentSetupUnavailableError);
       releaseList();
-      await staleRefresh;
-      await expect(setup).rejects.toBeInstanceOf(AgentSetupUnavailableError);
+      await Promise.all([staleRefresh, setupRejected]);
       expect(configStore.get().inference?.assignments?.agent).toBeUndefined();
       expect(service.snapshot()).toMatchObject({ configured: false, loggedIn: false });
     } finally {
