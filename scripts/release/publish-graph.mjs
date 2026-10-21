@@ -119,6 +119,27 @@ export async function packStagedPackage(stageDir, tarballDir) {
   return { integrity: packed.integrity, tarball: join(tarballDir, packed.filename) };
 }
 
+/** Normalize an exact-version lookup; malformed success must never permit publication. */
+export function parsePublishedVersion(stdout) {
+  const report = JSON.parse(stdout);
+  // npm 12 returns an array even for one exact version; npm 11 returns the object.
+  const parsed = Array.isArray(report) ? (report.length === 1 ? report[0] : null) : report;
+  const distTags = parsed?.["dist-tags"];
+  if (
+    !parsed ||
+    typeof parsed["dist.integrity"] !== "string" ||
+    !parsed["dist.integrity"] ||
+    (distTags !== undefined &&
+      (!distTags ||
+        typeof distTags !== "object" ||
+        Array.isArray(distTags) ||
+        Object.values(distTags).some((version) => typeof version !== "string")))
+  ) {
+    throw new Error("npm view reported no single version with tarball integrity");
+  }
+  return { integrity: parsed["dist.integrity"], distTags: distTags ?? {} };
+}
+
 /**
  * What the registry holds for name@version: `null` when the version is
  * absent, else its artifact integrity and the dist-tags of the package.
@@ -146,11 +167,7 @@ export async function viewPublishedVersion(name, version, registry) {
       cause: err,
     });
   }
-  const trimmed = output.trim();
-  if (trimmed === "" || trimmed === "{}") return null;
-  const parsed = JSON.parse(trimmed);
-  if (typeof parsed["dist.integrity"] !== "string") return null;
-  return { integrity: parsed["dist.integrity"], distTags: parsed["dist-tags"] ?? {} };
+  return parsePublishedVersion(output);
 }
 
 export function publishTarball(tarball, { registry, tag, access }) {
