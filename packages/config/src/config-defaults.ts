@@ -120,7 +120,8 @@ export const CONFIG_DEFAULTS = {
     },
     reverification: { enabled: true, intervalDays: 14, maxPerSweep: 12, batchSize: 6 },
     provenanceRecheck: { enabled: true },
-    tasks: { autoApply: true },
+    tasks: { autoApply: true, proposeGate: "shadow" },
+    interest: { enabled: true, lookup: { perPolarity: 4, cosineFloor: 0.55, overlapFloor: 0.2 } },
     // Ignored; kept so existing configs still parse.
     judge: { enabled: true },
     observations: {

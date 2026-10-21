@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.omnesis.android.session.SessionManager
 import dev.omnesis.android.sources.SourceCatalog
+import dev.omnesis.android.transport.dto.DailyBriefReactionKind
 import kotlinx.coroutines.flow.StateFlow
 import javax.inject.Inject
 
@@ -45,6 +46,14 @@ class AgentViewModel @Inject constructor(
     fun ackLastTurnError() = coordinator.ackLastTurnError()
 
     fun cancelTurn() = coordinator.cancelTurn()
+    fun updateDraft(text: String, commandId: String?) = coordinator.updateDraft(text, commandId)
+    fun editPrompt(text: String) = coordinator.editPrompt(text)
+    fun finishDraftSubmission() = coordinator.finishDraftSubmission()
+    fun cancelPromptEdit() = coordinator.cancelPromptEdit()
+    fun answerClarification(text: String) = coordinator.submitFollowUp(text)
+    fun sendQueuedNow(ids: List<String>) = coordinator.sendQueuedNow(ids)
+    fun retrySubmission(id: String) = coordinator.retrySubmission(id)
+    fun editPendingSubmission(id: String) = coordinator.editPendingSubmission(id)
 
     fun retry() = coordinator.retry()
     fun retryLiveSession() = coordinator.retryLiveSession()
@@ -65,4 +74,13 @@ class AgentViewModel @Inject constructor(
 
     /** What a morning brief was based on. */
     suspend fun dailyBriefItems(conversationId: String, day: String) = coordinator.dailyBriefItems(conversationId, day)
+
+    /** What the reader thinks of one of a morning brief's items. */
+    suspend fun reactToBriefItem(
+        conversationId: String,
+        day: String,
+        observationId: String,
+        reaction: DailyBriefReactionKind?,
+        note: String?,
+    ) = coordinator.reactToBriefItem(conversationId, day, observationId, reaction, note)
 }

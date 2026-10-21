@@ -38,6 +38,7 @@ import { checkKnowledgeOutcome, KnowledgeOutcomeRejected } from "./outcome-check
 import { LOOP_FIELD_REFERENCE_GUIDANCE } from "./references.js";
 import { assertKnowledgeSavePreflight } from "./save-preflight.js";
 import { applyWikiEdits, WikiEditError } from "./wiki-edit.js";
+import { WIKI_RETIREMENT_REASON_MAX } from "./wiki-retirement.js";
 import { getKnowledgeNode } from "./storage.js";
 import { ClaimMarkupError } from "./claims.js";
 import { knowledgePageRefForDocument } from "./document-context.js";
@@ -281,10 +282,9 @@ const knowledgeEditArgs = knowledgeSaveArgs
       inputVersions: knowledgeSaveArgs.shape.node.shape.inputVersions,
       edits: z
         .array(wikiEditOp)
-        .min(1)
         .max(64)
         .describe(
-          "Applied in order to the tagged markdown knowledge_fetch({id, editing:true}) returned at node.expectedRevision; each edit sees the result of the previous one.",
+          "Applied in order to the tagged markdown knowledge_fetch({id, editing:true}) returned at node.expectedRevision; each edit sees the result of the previous one. An empty list saves the page unchanged, to record review (reviewedClaimIds, curationDeferral) without resending it.",
         ),
     }),
   })
@@ -355,6 +355,7 @@ export const KNOWLEDGE_MUTATING_TOOLS = new Set([
   "knowledge_evidence",
   "knowledge_save",
   "knowledge_edit",
+  "knowledge_retire",
   "knowledge_propose_page",
   "knowledge_candidate_decide",
   "knowledge_next_frontier",
@@ -617,7 +618,7 @@ export function buildKnowledgeTools(
   /** Splice targeted edits into this run's editing read, then save it exactly as knowledge_save would. */
   const editWiki = async (input: z.output<typeof knowledgeEditArgs>, signal?: AbortSignal) => {
     const { edits, ...fields } = input.node;
-    const ops = edits.map((edit) => edit.op).join(",");
+    const ops = edits.map((edit) => edit.op).join(",") || "unchanged";
     const base = dependencyReceipts.editingRead(fields.id);
     try {
       if (!base || base.revision !== fields.expectedRevision)
@@ -677,6 +678,30 @@ export function buildKnowledgeTools(
         )
           error.message += ` Nothing was saved, and this run's editing read of revision ${base.revision} is still the current page: any retry edits it at the same expectedRevision without fetching the page again.`;
       }
+      throw error;
+    }
+  };
+  /** Retire a wiki page this run has read for editing at the exact revision it names. */
+  const retireWiki = async (input: { id: string; expectedRevision: number; reason: string }) => {
+    const read = dependencyReceipts.editingRead(input.id);
+    try {
+      if (!read || read.revision !== input.expectedRevision)
+        throw new KnowledgeStorageError(
+          "revision_conflict",
+          `Retire only a page this run read with knowledge_fetch({id, editing:true}) at expectedRevision. ${read ? `This run's latest editing read is revision ${read.revision}; ` : ""}fetch the page with editing:true, review it, and retire that revision.`,
+        );
+      const retired = await service.deps.writeGate["knowledge.retire"](
+        input,
+        runFence,
+        service.deps.clock(),
+      );
+      wikiWrites.info(
+        `Wiki retired via knowledge_retire on ${retired.id}: r${input.expectedRevision}→r${retired.revision}`,
+      );
+      return { ...retired, retired: true };
+    } catch (error) {
+      if (error instanceof KnowledgeStorageError)
+        wikiWrites.info(`Wiki retirement refused on ${input.id} (${error.code})`);
       throw error;
     }
   };
@@ -983,11 +1008,25 @@ export function buildKnowledgeTools(
     ),
     tool(
       "knowledge_edit",
-      "Change part of an existing wiki or root page without resending it: the preferred way to correct a figure, enrich a section or add one. Use knowledge_save only to create a page or to restructure most of it. First read knowledge_fetch({id, editing:true}); node.edits apply in order to exactly that tagged markdown at node.expectedRevision. replace_section replaces a section's heading line, body and subsections (up to the next heading of the same or a higher level), including the claim tags that open just before its heading; delete_section removes it; insert_section adds tagged Markdown after or before a section, or at the start or end of the page; replace_text swaps one exact passage, claim tags included, that must occur exactly once. The resulting page then goes through every knowledge_save check unchanged, and the other node fields mean what they mean there: claims removed by an edit need node.claimRemovals, new claim refs need knowledge_reference reads or node.inputVersions, a root's dropped links need node.navigationRemovals, and maintenance needs the same frontier, fingerprint and review fields. Untouched claims keep their stored versions. A missing or ambiguous target, or a section whose edge falls inside a claim, is refused without saving; the error names the available headings or the occurrence count. Returns the new revision and the sections changed, not the page; fetch again with editing:true before another edit. A refused edit saves nothing; when its error says this run's editing read is still the current page, a retry needs no new fetch.",
+      "Change part of an existing wiki or root page without resending it: the preferred way to correct a figure, enrich a section or add one. Use knowledge_save only to create a page or to restructure most of it. First read knowledge_fetch({id, editing:true}); node.edits apply in order to exactly that tagged markdown at node.expectedRevision. replace_section replaces a section's heading line, body and subsections (up to the next heading of the same or a higher level), including the claim tags that open just before its heading; delete_section removes it; insert_section adds tagged Markdown after or before a section, or at the start or end of the page; replace_text swaps one exact passage, claim tags included, that must occur exactly once. The resulting page then goes through every knowledge_save check unchanged, and the other node fields mean what they mean there: claims removed by an edit need node.claimRemovals, new claim refs need knowledge_reference reads or node.inputVersions, a root's dropped links need node.navigationRemovals, and maintenance needs the same frontier, fingerprint and review fields. Untouched claims keep their stored versions. A missing or ambiguous target, or a section whose edge falls inside a claim, is refused without saving; the error names the available headings or the occurrence count. With no edits it saves the page unchanged: the way to record reviewedClaimIds or a curationDeferral on a page you are not changing, instead of resending it through knowledge_save. Returns the new revision and the sections changed, not the page; fetch again with editing:true before another edit. A refused edit saves nothing; when its error says this run's editing read is still the current page, a retry needs no new fetch.",
       knowledgeEditArgs,
       true,
       editWiki,
       (input) => nodeTitle(input.node.id),
+    ),
+    tool(
+      "knowledge_retire",
+      "Retire an existing wiki page as a deliberate, reviewed decision, when its subject no longer warrants a page: for example most of its claims lost their only support because their sources were deleted, or another page now covers it. Prefer repair when the page is still useful: rewrite claims against current evidence, or drop individual unsupported claims with node.claimRemovals through knowledge_edit. First read knowledge_fetch({id, editing:true}); pass that expectedRevision and a specific reason, which is kept on the retired revision. The page stays on record as withdrawn with its history, but leaves search, the page directory and maintenance and can no longer be cited or edited; pages that read it are marked for review. The root page is never retired.",
+      z
+        .object({
+          id,
+          expectedRevision: z.number().int().positive(),
+          reason: z.string().trim().min(1).max(WIKI_RETIREMENT_REASON_MAX),
+        })
+        .strict(),
+      true,
+      retireWiki,
+      (input) => nodeTitle(input.id),
     ),
   ];
   if (context.engine && context.batchId) {

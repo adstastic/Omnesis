@@ -145,15 +145,20 @@ data class TaskHistoryState(
     val error: String? = null,
 ) {
     /**
-     * The change the history offers to undo in place: its newest entry, when Omnesis applied it on
-     * its own and it is still the change undo would revert. Null otherwise.
+     * The change the history offers to undo in place: its newest entry, when Omnesis made it on
+     * its own (applied, added or withheld) and it is still the change undo would revert. Null
+     * otherwise.
      */
     val autoAppliedUndoSeq: Long?
         get() {
             val detail = detail ?: return null
             val newest = detail.history.firstOrNull() ?: return null
-            return newest.seq.takeIf { newest.kind == "auto_applied" && it == detail.undoSeq }
+            return newest.seq.takeIf { newest.kind in OMNESIS_OWN_CHANGE_KINDS && it == detail.undoSeq }
         }
+
+    private companion object {
+        val OMNESIS_OWN_CHANGE_KINDS = setOf("auto_applied", "auto_accepted", "withheld")
+    }
 }
 
 data class TasksUiState(
@@ -310,13 +315,6 @@ fun suggestionsBannerText(count: Int, experimental: Boolean): String? = when {
     count == 1 -> "Omnesis has created 1 task for your review"
     else -> "Omnesis has created $count tasks for your review"
 }
-
-/**
- * Whether a segment ends with the reminder that tasks are added through Tell Omnesis. Suggested
- * and Done hold what Omnesis or the past put there, so the reminder answers nothing there.
- */
-fun showsCaptureHint(segment: TaskSegment): Boolean =
-    segment != TaskSegment.SUGGESTED && segment != TaskSegment.DONE
 
 /**
  * Whether a long press on [task]'s row opens the action fan: any open task. A suggestion's fan

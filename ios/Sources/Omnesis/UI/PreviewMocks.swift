@@ -5031,6 +5031,61 @@ enum PreviewMocks {
         )
     }()
 
+    static let agentConversationControls = AppStore.AgentPreviewSeed(
+        sessionId: "conversation-controls-preview",
+        model: "preview",
+        backend: "preview",
+        title: "Activity comparison",
+        turns: [
+            .user(id: "preview-prompt", text: "Compare my activity."),
+            .assistant(AgentAssistantTurn(
+                id: "preview-answer",
+                parts: [.text("I can compare your activity.\n\n```swift\nlet total = 42\n```")],
+                historyCompleted: true
+            )),
+        ],
+        citations: [],
+        conversations: [],
+        connected: true
+    )
+
+    static let conversationClarificationTurn = AgentTurn.assistant(AgentAssistantTurn(
+        id: "clarification-turn",
+        parts: [
+            .text("I can compare your activity."),
+            .tool(AgentToolCall(
+                toolCallId: "clarification-call", tool: "ask_clarification",
+                args: JSONAny(value: [:]), argsSummary: "Choose a period", argsKnown: true,
+                result: .unknown(kind: "structured", raw: JSONAny(value: [
+                    "kind": "structured", "resultType": "conversation.clarification",
+                    "data": [
+                        "id": "clarification-example", "question": "Which period should I compare?",
+                        "choices": [["label": "This month"], ["label": "This year"]],
+                    ],
+                ])), durationMs: 1
+            )),
+            .text("Which period should I compare? This month or this year?"),
+        ], historyCompleted: true
+    ))
+
+    static let conversationFollowupDraft = "Use this year instead, and include a short summary."
+
+    static let conversationControls = ConversationControls(
+        busy: true,
+        pendingClarification: ConversationClarification(
+            id: "clarification-example", question: "Which period should I compare?",
+            choices: [
+                .init(label: "This month", description: "Compare with the previous month"),
+                .init(label: "This year", description: "Compare with the previous year"),
+            ]
+        ),
+        queuedMessages: [
+            .init(id: "queued-example", text: "Include a short summary.", status: "queued", error: nil),
+            .init(id: "queued-second", text: "Compare the totals too.", status: "queued", error: nil),
+        ],
+        capabilities: .init(coalescedQueue: true, queueSendNow: true)
+    )
+
     static let agentBusyStreaming = AppStore.AgentPreviewSeed(
         sessionId: "s_busy",
         model: "claude-sonnet-4-6",
@@ -7075,7 +7130,8 @@ extension PreviewMocks {
                 observationId: "obs_loan",
                 summary: "The loan offer letter asks for a signed reply by Friday.",
                 sources: [DailyBriefSource(id: "doc_loan_offer", title: "Loan offer letter", sourceType: "gmail")],
-                tasks: [DailyBriefTask(id: "loop_brief_loan", title: "Sign and return the loan offer", state: "open")]
+                tasks: [DailyBriefTask(id: "loop_brief_loan", title: "Sign and return the loan offer", state: "open")],
+                reaction: DailyBriefReaction(kind: .up, at: DailyBriefReaction.instant("2026-10-14T07:10:03.000Z"))
             ),
             DailyBriefItem(
                 rank: 2,
@@ -7085,7 +7141,12 @@ extension PreviewMocks {
                     DailyBriefSource(id: "doc_boiler_reminder", title: "Boiler service reminder", sourceType: "gmail"),
                     DailyBriefSource(id: "doc_engineer_slots", title: "Engineer availability this week", sourceType: "gmail"),
                 ],
-                tasks: [DailyBriefTask(id: "loop_brief_boiler", title: "Book the boiler engineer", state: "open")]
+                tasks: [DailyBriefTask(id: "loop_brief_boiler", title: "Book the boiler engineer", state: "open")],
+                reaction: DailyBriefReaction(
+                    kind: .notInterested,
+                    note: "I already booked it last week",
+                    at: DailyBriefReaction.instant("2026-10-14T07:11:40.000Z")
+                )
             ),
             DailyBriefItem(
                 rank: 3,
@@ -7133,6 +7194,60 @@ extension PreviewMocks {
     )
 
     static let dailyBriefPages = [dailyBriefMonday, dailyBriefYesterday, dailyBriefToday]
+
+    /// One brief item per reaction state, for the thumbs on their own.
+    struct DailyBriefReactionState {
+        let name: String
+        let item: DailyBriefItem
+        var failure: (any Error)?
+    }
+
+    static let dailyBriefReactionStates: [DailyBriefReactionState] = [
+        DailyBriefReactionState(
+            name: "none",
+            item: DailyBriefItem(rank: 1, observationId: "obs_react_none", summary: "The gym membership renews on the 1st.")
+        ),
+        DailyBriefReactionState(
+            name: "up",
+            item: DailyBriefItem(
+                rank: 2,
+                observationId: "obs_react_up",
+                summary: "The passport renewal appointment is on Monday at 09:30.",
+                reaction: DailyBriefReaction(kind: .up, at: DailyBriefReaction.instant("2026-10-14T07:10:03.000Z"))
+            )
+        ),
+        DailyBriefReactionState(
+            name: "not-interested",
+            item: DailyBriefItem(
+                rank: 3,
+                observationId: "obs_react_not_interested",
+                summary: "The neighbourhood newsletter lists a bake sale on Saturday.",
+                reaction: DailyBriefReaction(
+                    kind: .notInterested,
+                    note: "Newsletters like this never matter to me",
+                    at: DailyBriefReaction.instant("2026-10-14T07:11:40.000Z")
+                )
+            )
+        ),
+        DailyBriefReactionState(
+            name: "factual-error",
+            item: DailyBriefItem(
+                rank: 4,
+                observationId: "obs_react_factual_error",
+                summary: "The electricity bill is due on Thursday.",
+                reaction: DailyBriefReaction(
+                    kind: .factualError,
+                    note: "It was paid by direct debit on the 3rd",
+                    at: DailyBriefReaction.instant("2026-10-14T07:12:15.000Z")
+                )
+            )
+        ),
+        DailyBriefReactionState(
+            name: "not-saved",
+            item: DailyBriefItem(rank: 5, observationId: "obs_react_not_saved", summary: "The dentist moved the check-up to Friday."),
+            failure: URLError(.cannotConnectToHost)
+        ),
+    ]
 
     /// The tasks the brief chips point at, as the Tasks demo gateway holds them.
     static let dailyBriefTasks: [TaskRecord] = [

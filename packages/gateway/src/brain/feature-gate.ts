@@ -55,6 +55,8 @@ import {
   TASK_CHECK_SPEND_MECHANISM,
   taskCheckPayloadCapture,
 } from "./tasks/task-checks.js";
+import { TaskProposeGate, TASK_PROPOSE_SPEND_MECHANISM } from "./tasks/task-propose.js";
+import { captureOwnerDecisionPayload } from "./decision-payload.js";
 import { settleTaskProposals } from "./tasks/settle-proposals.js";
 import { cognitionSpendDay } from "./storage/spend.js";
 import type { ChatRoleReadinessDeps } from "../models/chat-role-readiness.js";
@@ -69,6 +71,7 @@ import type { SearchPipeline } from "../search/pipeline.js";
 import type { SyncStatusRegistry } from "../sync-status.js";
 import type { PersonLookupGate } from "../domain/person-lookup.js";
 import type { ResolvedBrainSettings } from "./config.js";
+import type { InterestLookup } from "./interest/engine.js";
 import type { SweepService } from "./sweeps/service.js";
 import type { CognitionRunActivity } from "./run-activity.js";
 import type {
@@ -169,6 +172,12 @@ export interface BriefsRunQueueBootDeps {
    * its agent turn; null (or omitted) leaves every claimed run to execute.
    */
   getDecision?: () => DecisionCapability | null;
+  /**
+   * The interest ledger's lookup: the owner's past reactions that resemble an
+   * item, shown to the gates that rank observations, judge a new suggestion
+   * and schedule new evidence. Omitted, those gates decide without it.
+   */
+  interest?: InterestLookup;
   /** The operator's `OMNESIS.md`, re-read per run. Absent without a config dir. */
   getOperatorInstructions?: () => string;
   /** Directory run transcripts persist under (created on demand). */
@@ -411,6 +420,7 @@ export async function bootBriefs(deps: {
         activeDerivationStages: rq.activeDerivationStages ?? (() => DERIVATION_STAGES),
         clock: rq.clock ?? Date.now,
         log: log.child("knowledge"),
+        ...(rq.interest ? { interest: rq.interest } : {}),
         decisions: {
           getDecision: rq.getDecision,
           log: log.child("knowledge-decision"),
@@ -457,8 +467,36 @@ export async function bootBriefs(deps: {
             clock: rq.clock ?? Date.now,
             idGen: () => crypto.randomUUID(),
             log: log.child("task-check"),
+            ...(rq.interest ? { interest: rq.interest } : {}),
           })
         : undefined;
+      const taskPropose =
+        rq.getDecision && rq.interest
+          ? new TaskProposeGate({
+              getDecision: rq.getDecision,
+              getMode: () => rq.getSettings().tasks.proposeGate,
+              interest: rq.interest,
+              recordDecision: (record) => deps.writeGate.recordCognitionDecision(record),
+              // The loop's node does not exist yet, so the subjects are its documents.
+              capturePayload: (input) =>
+                captureOwnerDecisionPayload(
+                  rq.db,
+                  { kind: "loop", id: input.loopId },
+                  input.documentId === null ? [] : [input.documentId],
+                ) ?? undefined,
+              recordSpend: (modelId, inputTokens) =>
+                recordDecisionSpend(
+                  deps.writeGate,
+                  cognitionSpendDay((rq.clock ?? Date.now)()),
+                  TASK_PROPOSE_SPEND_MECHANISM,
+                  modelId,
+                  inputTokens,
+                ),
+              clock: rq.clock ?? Date.now,
+              idGen: () => crypto.randomUUID(),
+              log: log.child("task-propose"),
+            })
+          : undefined;
       runtimeSeams = await createCognitionRuntime({
         knowledge,
         db: rq.db,
@@ -498,6 +536,8 @@ export async function bootBriefs(deps: {
             }
           : {}),
         ...(taskChecks ? { taskChecks } : {}),
+        ...(taskPropose ? { taskPropose } : {}),
+        ...(rq.interest ? { interest: rq.interest } : {}),
         ...(rq.cognition.policyStore ? { policyStore: rq.cognition.policyStore } : {}),
         getSettings: rq.getSettings,
         ...(rq.getOperatorInstructions
@@ -897,6 +937,7 @@ async function observationRuntimeDeps(
         ? { getEntailmentVerifier: rq.cognition.getEntailmentVerifier }
         : {}),
       thresholds,
+      ...(rq.interest ? { interest: rq.interest } : {}),
     },
     createScorer: (runId) =>
       createObservationScorer(
@@ -908,6 +949,7 @@ async function observationRuntimeDeps(
           thresholds,
           nextBriefAt: (now) => nextMorningBriefAt(now, rq.getSettings().digest.hour),
           log: log.child("observations"),
+          ...(rq.interest ? { interest: rq.interest } : {}),
         },
         runId,
       ),

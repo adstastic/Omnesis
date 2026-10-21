@@ -178,14 +178,23 @@ final class TasksLogicTests: XCTestCase {
         }
         let done = event(9, "auto_applied", change: "complete")
         let edit = event(9, "auto_applied", change: "edit")
+        let added = event(9, "auto_accepted")
+        let withheld = event(9, "withheld")
         XCTAssertEqual(TaskJournal.eventTitle(done), "Marked done by Omnesis")
         XCTAssertEqual(TaskJournal.eventTitle(edit), "Updated by Omnesis")
+        XCTAssertEqual(TaskJournal.eventTitle(added), "Added by Omnesis")
+        XCTAssertEqual(TaskJournal.eventTitle(withheld), "Withheld by Omnesis")
         // The title already says who made the change.
         XCTAssertNil(TaskJournal.eventSource(done))
+        XCTAssertNil(TaskJournal.eventSource(added))
+        XCTAssertNil(TaskJournal.eventSource(withheld))
         XCTAssertEqual(TaskJournal.eventSource(event(8, "struck")), "By Omnesis")
 
         let task = TaskRecord(id: "t", title: "Pay the invoice")
         XCTAssertEqual(TaskJournal.autoAppliedUndoSeq(TaskDetail(task: task, history: [done], undoSeq: 9)), 9)
+        XCTAssertEqual(TaskJournal.autoAppliedUndoSeq(TaskDetail(task: task, history: [added], undoSeq: 9)), 9)
+        XCTAssertEqual(TaskJournal.autoAppliedUndoSeq(TaskDetail(task: task, history: [withheld], undoSeq: 9)), 9)
+        XCTAssertNil(TaskJournal.autoAppliedUndoSeq(TaskDetail(task: task, history: [added], undoSeq: 8)))
         // Not undoable any more, or a later change came first, or not by Omnesis.
         XCTAssertNil(TaskJournal.autoAppliedUndoSeq(TaskDetail(task: task, history: [done], undoSeq: nil)))
         XCTAssertNil(TaskJournal.autoAppliedUndoSeq(TaskDetail(
@@ -202,13 +211,6 @@ final class TasksLogicTests: XCTestCase {
         XCTAssertNil(TaskJournal.reviewBannerText(suggested: 0))
         XCTAssertEqual(TaskJournal.reviewBannerText(suggested: 1), "Omnesis has created 1 task for your review")
         XCTAssertEqual(TaskJournal.reviewBannerText(suggested: 5), "Omnesis has created 5 tasks for your review")
-    }
-
-    func testCaptureHintOnTheViewsAPersonFills() {
-        XCTAssertEqual(
-            TaskViewKind.allCases.filter(TaskJournal.showsCaptureHint(for:)),
-            [.today, .month, .future, .anytime, .waiting]
-        )
     }
 
     func testDocumentsShowAFewThenTheRestOnRequest() {

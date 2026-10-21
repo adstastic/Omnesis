@@ -655,6 +655,13 @@ test("answers first, in the assistant's own voice, with no talk of its machinery
   expect(prompt).not.toContain("I'm built for your personal corpus");
 });
 
+test("counts a ranking question across every source, not the first one searched", () => {
+  const prompt = buildSystemPrompt({});
+  expect(prompt).toContain("**Rank across every source.**");
+  expect(prompt).toContain("Don't filter it to one source unless they named it");
+  expect(prompt).toContain("say which sources the answer covers");
+});
+
 test("binds interactive citations to the exact supporting source version", () => {
   const prompt = buildSystemPrompt({});
   expect(prompt).toContain("exact supporting source version you inspected");
@@ -669,4 +676,15 @@ test("makes the user's Tasks part of every today answer, led by what is still ah
   expect(prompt).toContain("Lead with what is still ahead of `now`");
   expect(prompt).toContain("never present one that has passed as upcoming");
   expect(buildSystemPrompt({})).not.toContain("Lead with what is still ahead of `now`");
+});
+
+test("continues unfinished work after a correction without treating courtesy as cancellation", () => {
+  const prompt = buildSystemPrompt({ audience: "interactive" });
+  expect(prompt).toContain("continue the unfinished request immediately with that change");
+  expect(prompt).toContain(
+    '"thanks" accompanying the correction does not cancel the original request',
+  );
+  expect(prompt).toContain("do not ask whether to resume");
+  expect(prompt).toContain("Stop or change tasks when the user explicitly asks");
+  expect(prompt).toContain("only when a missing detail actually blocks progress");
 });

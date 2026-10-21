@@ -19,7 +19,7 @@ import {
 } from "./work.js";
 import { historyHorizonFloor } from "./history-horizon.js";
 import { KNOWLEDGE_DISCOVERY_POLICY, listKnowledgeDiscoveryBacklog } from "./discovery.js";
-import { judgeKnowledge } from "./decision.js";
+import { judgeKnowledge, knowledgeUrgencyState } from "./decision.js";
 import { scheduleKnowledgeChange, type MaintenanceArc } from "./planner.js";
 import type { KnowledgeEngineDeps } from "./engine.js";
 /** Bounded writer ops one tick spends withdrawing excluded work; the rest waits a tick. */
@@ -103,11 +103,10 @@ export class KnowledgeIntake {
             ? await judgeKnowledge(
                 this.context.deps.decisions,
                 "urgency",
-                {
-                  documentId: source.id,
-                  title: source.title,
-                  content: source.content.slice(0, 24000),
-                },
+                await knowledgeUrgencyState(
+                  { documentId: source.id, title: source.title, content: source.content },
+                  this.context.deps.interest,
+                ),
                 {
                   nodeId: `source:${source.id}`,
                   ...(decisionId
@@ -149,9 +148,13 @@ export class KnowledgeIntake {
       } else if (
         change.kind === "node_changed" ||
         change.kind === "node_deleted" ||
-        change.kind === "source_evidence_changed"
+        change.kind === "source_evidence_changed" ||
+        change.kind === "source_deleted"
       ) {
-        const sourceEvidence = change.kind === "source_evidence_changed";
+        // A deleted source has no interpretation left to run; like changed
+        // explicit evidence, its direct dependents are queued for review.
+        const sourceEvidence =
+          change.kind === "source_evidence_changed" || change.kind === "source_deleted";
         // The change ledger retains the committed creation revision even if
         // the page has already been edited again before intake catches up.
         const newWiki =

@@ -51,9 +51,37 @@ and privacy cleanup continue when autonomous synthesis is stopped.
 ## Changes and maintenance
 
 Source writes record a durable change and invalidate affected evidence without
-calling a model. Invalidated claims remain visibly stale until maintenance;
-privacy-deleted evidence is denied immediately while bounded cleanup removes
-derived content and index projections.
+calling a model. Invalidated claims remain visibly stale until maintenance.
+
+A source deletion is a change like an edit, whatever caused it: a sync
+tombstone, a snapshot-absence sweep, a source removal or an explicit delete.
+In the same transaction the document is tombstoned
+(`knowledge_source_revisions.deleted=1`), so it can never be read or newly
+cited again, and its own evidence passages, outcome assessments, unpublished
+candidates and organization cohorts are removed. Knowledge derived from it is
+never deleted or scrubbed: the bounded cascade walks only the direct,
+non-navigational dependents of the source, as for an edit, marks the claims that
+relied on it stale and the pages stale, and queues them for maintenance. Pages
+that read a stale claim are stale in turn; pages that only link to it for
+navigation are untouched, and retained history keeps its text. Maintenance then
+reconciles each stale page with the model: it rewrites a claim against current
+evidence, marks it unsupported, removes it with `node.claimRemovals`, or retires
+the whole page with `knowledge_retire`.
+
+`knowledge_retire` is the Brain's only way to take a wiki page out of service,
+and it is a deliberate, reviewed act: it requires this run's
+`knowledge_fetch({id, editing:true})` read at `expectedRevision` and a specific
+reason, and is granted exactly where `knowledge_save` is. The page is withdrawn,
+not deleted: the reason is stored on the retired revision, the whole history is
+kept, the page leaves search, the page directory and maintenance, it can no
+longer be cited or edited, and every page that read it is invalidated for
+review. The root is never retired. Each retirement logs one content-free line,
+`Wiki retired via knowledge_retire on <id>: rN→rM`.
+
+Only the deletion of a canonical owner record (a loop, observation or
+annotation) erases a knowledge node: that owner's own node, its history and
+the owner records attached to it, such as the observations of a deleted loop.
+Its dependents, including wiki pages, are invalidated, never deleted.
 
 Maintenance assignments distinguish affected-claim repair from whole-page
 curation (`review=true`), root orientation and evidence organization. Wiki curation carries an explicit
@@ -143,8 +171,8 @@ New evidence needs discovery even when no dependency points to it yet. The
 agent searches established context, adds evidence to existing synthesis, or
 proposes a scoped page candidate. A source does not require its own page.
 Agent transcripts are excluded from automatic source discovery. When explicitly
-cited as evidence, their edits repair existing dependents and their deletion
-purges derived content, including historical provenance.
+cited as evidence, their edits and deletion invalidate existing dependents for
+repair, like any other source.
 Newly arriving historical evidence is considered without treating its events
 as new commitments or allowing an old proposal to overwrite an accepted plan.
 
@@ -188,7 +216,7 @@ any source of it is installed. Every consumer reads the list live
 The interactive agent and its own memory tools are unaffected. Existing
 knowledge derived from an excluded source is kept and stays visible to Brain
 runs as knowledge (annotation evidence quotes, loop document ids, page claims);
-its doc and person annotations are skipped by the re-verification sweep. Source edits and deletions still invalidate and purge
+its doc and person annotations are skipped by the re-verification sweep. Source edits and deletions still invalidate
 dependent knowledge as usual. Journal entries acknowledged while a source was
 excluded are not replayed; historical review within `brain.bootstrap.horizon`
 admits those documents once the exclusion is removed. Bootstrap status reports
@@ -233,7 +261,7 @@ group follow its all/any support logic; they do not assign individual phrases to
 individual sources. This context helps select evidence without reconstructing an
 entire page, and does not independently verify its claims. Exact-ID loop reads
 retain done/dismissed status and history while list/search return active loops;
-privacy-hidden or physically deleted owners remain unavailable. The mutation boundary parses markup,
+erased or physically deleted owners remain unavailable. The mutation boundary parses markup,
 checks references and versions, and invokes the entailment verifier on changed
 claims. For wiki and root claims, verification also checks attribution implied by
 page title, section headings and enclosing claims. Moving unchanged words to a
@@ -292,7 +320,7 @@ A wiki supplies context; a loop tracks an outcome. Organizational links can
 express project membership, page hierarchy and separately trackable subloops.
 They do not imply evidential support. Operational blocking and completion stay
 in the loop's canonical fields. Closing or retiring a loop preserves its useful
-history; deleting private evidence has separate removal semantics.
+history; deleting its evidence invalidates it for review like any other change.
 
 A loop keeps the same completion criterion as its evidence develops. Titles and
 descriptions may clarify that outcome; a shared person, topic or project does
@@ -628,8 +656,8 @@ because their outcome is old.
 
 Archived loops and retired or superseded annotations preserve their historical prose rather
 than undergoing routine rewriting. Evidence changes still invalidate their
-support and propagate support loss to dependent durable synthesis; privacy
-deletion still removes affected material. Canonical historical owner work settles
+support and propagate support loss to dependent durable synthesis, deletion
+included. Canonical historical owner work settles
 before a model turn, with lifecycle and revision checked again in the writer transaction;
 dependent synthesis still receives support-loss maintenance. A loop is historical only after
 its active record has been removed and an archived record exists; a retained active
@@ -842,10 +870,85 @@ own is applied as an undoable `auto_applied` event, and the rest keep waiting.
 A completion or deadline stays a proposal, since its evidence quotes are not
 kept. An applied change also replaces any proposal still waiting on that task.
 
+## What the user cares about
+
+The Brain learns what the user cares about only from what they did on
+purpose. Three things count: accepting, creating or ignoring a task; a thumbs
+up or down on an item of the morning brief; and what they say about their
+interests in the Morning brief conversation. Each becomes one signed example
+in the interest ledger (`interest_signals`): the text they reacted to, their
+own words when they gave any, and, once the embedder has seen it, a vector of
+that text. Nothing is inferred from silence: a suggestion nobody touched and a
+brief nobody read leave no mark. Taking a reaction back (undoing an accept,
+clearing a thumbs) supersedes the example it produced rather than deleting it.
+
+Accepting a suggestion or creating a task is a positive example; ignoring a
+suggestion is a negative one, with the reason as its note. Striking,
+completing, editing or moving a task says nothing about interest and records
+nothing. A thumbs up on a brief item is positive; a thumbs down asks which of
+two things is wrong. "Not interested" is negative, with whatever the user
+typed or dictated as its note. "Factual error" is not about interest: it marks
+the observation disputed, records no example, and saves the correction as a
+Tell Omnesis note the note agent acts on. In the Morning brief conversation
+the agent has `interest_record`, which turns "I don't care about X" or "more
+of this" into a statement example; the tool exists in no other conversation.
+
+A gate does not score the ledger; it reads it. Before it asks its question, a
+gate looks up the few examples most like the item it judges (by vector when
+both have one from the live embedder and the item's own vector arrives within
+ten seconds, by word overlap otherwise) and puts them
+in its state as `owner_interest`: positive examples, negative examples and
+statements, each with its similarity and age. An empty ledger, or nothing
+above the similarity floor, leaves the request exactly as it was. Three gates
+read it: observation salience at noting time and at the morning recheck,
+the task checks, and the urgency question that schedules new evidence.
+
+A fourth gate is new: `task-propose` judges every suggestion the Brain drafts
+as withhold, suggest or adopt. It is asked only when the ledger holds
+something like the suggestion, and its verdict is bounded by what it was
+shown: adopt needs a positive example or a `more` statement and no negative;
+withhold needs a negative example or a `less` statement; anything else is a
+suggestion as today. `brain.tasks.proposeGate` sets what the verdict does.
+`shadow`, the default, records it and offers the suggestion as before.
+`enforce` withholds (the loop is created ignored: tracked, out of the Tasks
+views, offered again by undoing the `withheld` event in its history) or adopts
+(created accepted, with an `auto_accepted` event the user can undo; undoing
+one is the strongest negative example the ledger records). `off` asks nothing.
+A model outage fails open to a suggestion. `brain.interest.enabled: false`
+stops recording and stops showing examples; the gates then decide as if the
+ledger were empty.
+
+A gate looks up the few examples most like the item (by vector when both have
+one from the live embedder, by shared content words otherwise, never on one
+word alone); `brain.interest.lookup` sets how many it is shown of each kind
+(`perPolarity`, 4) and the similarity floors (`cosineFloor` 0.55,
+`overlapFloor` 0.2). Each example says which measure found it. Cosine scores
+depend on the embedder: with Qwen3-Embedding-0.6B, related short texts score
+roughly 0.4 to 0.75 and unrelated ones mostly below 0.4, so a floor near 0.45
+finds more of what the owner meant at the cost of an occasional stray example,
+which the decision model sees with its similarity and can discount. The owner's
+latest word on a thing is the one that counts: accepting a suggestion they had
+ignored supersedes the ignore, a changed thumbs supersedes the earlier one,
+and a statement about the same subject supersedes the previous statement. A
+purged observation or loop takes its examples with it; a deleted task's
+examples are kept as history but no longer count.
+
+The ledger exists only in experimental mode, where the gates that read it
+run; a stable gateway records nothing.
+
+Debug → Cognition → Interest shows the ledger: every example with its
+polarity, source, text and note, whether its vector is ready, and whether it
+was superseded; the suggestions the gate withheld, each with an **Offer
+again** that undoes the withholding; the `task-propose` verdicts; and a
+lookup box that shows what a gate would be shown for any text. A
+factual-error thumbs records no example and so appears there only as the
+observation's `disputed` action.
+
 ## Auditing the decision model
 
 Every call to the decision model writes one ledger row, whatever it returns:
-the worth gate, the record check, the task checks, observation salience and,
+the worth gate, the record check, the task checks, the suggestion gate
+(`task-propose`), observation salience and,
 outside any Brain run, the date-mention gate (`mention-worth`) and search
 routing (`find-route`) in `cognition_decisions`; discovery, impact, review and
 urgency in `knowledge_decisions`. A row names its run, its document and the
@@ -1409,8 +1512,8 @@ same bounded reference checks. The page remains labelled stale; omitted prose
 and navigation are not evidence. Support coverage reports budget truncation,
 and never promises an exhaustive inventory. Main-agent use still requires the
 actual full page read and an unchanged authorized snapshot; root injection uses
-the same qualified support checks within its character budget. Whole-page
-privacy erasure remains whole-page. Direct reads can materialize a freshness-only
+the same qualified support checks within its character budget. An erased or
+retired page is unavailable as a whole. Direct reads can materialize a freshness-only
 mirror lag without writing: the stored body, title, hash, metadata and creation
 time must exactly match the canonical builder at its recorded validity and the
 same physical revision. The emitted effective projection supplies the exact bytes
@@ -1460,6 +1563,6 @@ These states are diagnostic, not fresh support receipts: accepted storage and co
 review work can still leave claims unverified. No automatic retry or stricter completion
 gate is implied; reuse exact qualified claim references or original evidence.
 
-Root prompt support is checked against the exact qualified assertions originally exposed, including their selected proof and source identities. Navigation, unrelated sibling prose, physical revision banners and later context-budget fitting do not themselves invalidate those assertions. Changed selected context, proof, source authority or whole-root privacy still withholds the captured support; re-verifying unchanged words against changed evidence does not substitute a new proof into an existing answer. These private checks add no evidence to the prompt.
+Root prompt support is checked against the exact qualified assertions originally exposed, including their selected proof and source identities. Navigation, unrelated sibling prose, physical revision banners and later context-budget fitting do not themselves invalidate those assertions. Changed selected context, proof or source authority, including deletion of a selected claim's source, still withholds the captured support; re-verifying unchanged words against changed evidence does not substitute a new proof into an existing answer. These private checks add no evidence to the prompt.
 
 The verifier service admits at most two independent remote checks (Codex, HTTP or Anthropic), while native model contexts remain serial. This internal safety ceiling does not enlarge a backend's shared inference pool. Configuration swaps and disposal wait for every admitted operation's underlying cleanup, including canceled calls; caller deadlines and unavailable-write behavior remain unchanged.

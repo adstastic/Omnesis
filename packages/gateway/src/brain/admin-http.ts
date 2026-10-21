@@ -7,6 +7,7 @@
  * Resource-specific route registration lives in:
  * - `admin-http-loop-routes.ts`
  * - `admin-http-observation-routes.ts`
+ * - `admin-http-interest-routes.ts`
  * - `admin-http-run-routes.ts`
  * - `admin-http-transcript-routes.ts`
  * - `admin-http-list-routes.ts`
@@ -20,6 +21,7 @@
 import { NotFoundError } from "../http/errors.js";
 import { KnowledgeQueryService } from "./knowledge/query-service.js";
 import { mountKnowledgeAdminRoutes } from "./knowledge/admin-routes.js";
+import { mountCognitionInterestAdminRoutes } from "./admin-http-interest-routes.js";
 import { mountCognitionObservationAdminRoutes } from "./admin-http-observation-routes.js";
 import { mountCognitionListAdminRoutes } from "./admin-http-list-routes.js";
 import { mountCognitionLoopAdminRoutes } from "./admin-http-loop-routes.js";
@@ -36,6 +38,7 @@ import type {
   BootstrapSettingsView,
 } from "./bootstrap-status.js";
 import type { RunActivityReader } from "./cognition-admin-query-service.js";
+import type { InterestEngine } from "./interest/engine.js";
 import type { BriefsFeatureStatus } from "./feature-gate.js";
 import type { SweepService } from "./sweeps/service.js";
 import type { RouteApp } from "../http/routes/types.js";
@@ -66,6 +69,8 @@ export interface MountBrainAdminRoutesOpts {
     wipeCognitionNotes(now: number): Promise<void>;
   };
   activity?: RunActivityReader | undefined;
+  /** The interest ledger behind `/admin/brain/interest*`. Omitted, those routes are not mounted. */
+  interest?: InterestEngine | undefined;
   transcriptsDir?: string | undefined;
   clock?: (() => number) | undefined;
   getStatus?: (() => BriefsFeatureStatus) | undefined;
@@ -175,6 +180,12 @@ export function mountBrainAdminRoutes(app: RouteApp, opts: MountBrainAdminRoutes
   mountCognitionRunAdminRoutes(context);
   mountCognitionTranscriptAdminRoutes(context);
   mountCognitionObservationAdminRoutes(context);
+  if (opts.interest)
+    mountCognitionInterestAdminRoutes(context, {
+      db: opts.db,
+      interest: opts.interest,
+      clock: now,
+    });
   if (opts.sweeps) {
     mountCognitionSweepAdminRoutes(context, {
       db: opts.db,

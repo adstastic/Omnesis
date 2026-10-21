@@ -111,6 +111,8 @@ import type { ResolvedBrainSettings } from "../config.js";
 import type { CognitionRunExecutionContext } from "../run-driver.js";
 import type { RecordCheck } from "../record-check/check.js";
 import type { TaskChecks } from "../tasks/task-checks.js";
+import type { InterestLookup } from "../interest/engine.js";
+import type { TaskProposeGate } from "../tasks/task-propose.js";
 
 type Db = Database.Database;
 
@@ -223,6 +225,10 @@ export interface CognitionToolsetDeps {
   getTaskAutoApply?: () => boolean;
   /** Decision-model checks on Brain writes to the user's own tasks. Omitted, none run. */
   taskChecks?: TaskChecks;
+  /** The gate on new suggestions. Omitted, every suggestion is offered. */
+  taskPropose?: TaskProposeGate;
+  /** The owner's past reactions, read by the gates on tasks. Omitted, they judge without them. */
+  interest?: InterestLookup;
   validateAnnotationEvidence?: AnnotationToolDeps["validateAnnotationEvidence"];
   /**
    * The record check, bound per background run to the lanes it covers.
@@ -434,6 +440,8 @@ function ownToolsInput(
     ...(deps.getEntailmentVerifier ? { getEntailmentVerifier: deps.getEntailmentVerifier } : {}),
     ...(deps.getTaskAutoApply ? { taskAutoApply: deps.getTaskAutoApply() } : {}),
     ...(deps.taskChecks ? { taskChecks: deps.taskChecks } : {}),
+    ...(deps.taskPropose ? { taskPropose: deps.taskPropose } : {}),
+    ...(deps.interest ? { interest: deps.interest } : {}),
     ...(opts.triggeringLoopId !== undefined ? { triggeringLoopId: opts.triggeringLoopId } : {}),
     ...(opts.consumption ? { consumption: opts.consumption } : {}),
     ...(deps.idGen ? { idGen: deps.idGen } : {}),
@@ -498,6 +506,10 @@ export interface CognitionRuntimeDeps {
   recordCheck?: RecordCheck;
   /** Decision-model checks on Brain writes to the user's own tasks. Optional. */
   taskChecks?: TaskChecks;
+  /** The gate on new suggestions. Optional. */
+  taskPropose?: TaskProposeGate;
+  /** The owner's past reactions, read by the gates on tasks. Optional. */
+  interest?: InterestLookup;
   /**
    * The observation pipeline: the morning recheck's judgement seams, the
    * note-time scorer and the morning brief sender. Absent (storage-only
@@ -621,6 +633,8 @@ export async function createCognitionRuntime(
     ...(deps.getEntailmentVerifier ? { getEntailmentVerifier: deps.getEntailmentVerifier } : {}),
     getTaskAutoApply: () => deps.getSettings().tasks.autoApply,
     ...(deps.taskChecks ? { taskChecks: deps.taskChecks } : {}),
+    ...(deps.taskPropose ? { taskPropose: deps.taskPropose } : {}),
+    ...(deps.interest ? { interest: deps.interest } : {}),
     ...(deps.recordCheck ? { recordCheck: deps.recordCheck } : {}),
     ...(deps.observations ? { createObservationScorer: deps.observations.createScorer } : {}),
     clock,
