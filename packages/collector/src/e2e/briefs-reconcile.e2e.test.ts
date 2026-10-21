@@ -39,6 +39,8 @@
 import "./synth-env.js";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { createLogger } from "@omnesis/core";
+import Database from "better-sqlite3";
+import { enqueueKnowledgeWork } from "../../../gateway/src/brain/knowledge/work.js";
 import { knowledgeSourceRevisionSql } from "../../../gateway/src/brain/knowledge/source-revision.js";
 import { BrainObs } from "./brain-bench/obs.js";
 import { SyntheticE2EHarness } from "./synth-harness.js";
@@ -61,7 +63,6 @@ import {
   waitFor,
 } from "./briefs-scorecard.js";
 import { startScriptedLoopModelServer, type ScriptedLoopModelServer } from "./fake-loop-model.js";
-import type Database from "better-sqlite3";
 
 // Compress the engine cadences (read by the spawned gateway from its env,
 // which inherits ours). Durations like debounce come from the `brain`
@@ -485,6 +486,54 @@ describe("Brain reconcile quality on loops-test-life (scripted backend)", () => 
       const done = completedSourceRuns(fulfilmentDocId);
       return done.length >= 1 ? true : null;
     });
+
+    // Reoffer the already interpreted source explicitly. A repeated frontier
+    // must adopt the current confirmation, without another observation write.
+    let reviewId: string;
+    const writer = new Database(harness.getDbPath(), { fileMustExist: true });
+    writer.pragma("busy_timeout = 10000");
+    try {
+      reviewId = writer
+        .transaction(() => {
+          const now = Date.now();
+          const source = writer
+            .prepare<
+              [string],
+              { revision: string }
+            >(`SELECT ${knowledgeSourceRevisionSql("d")} AS revision FROM documents d WHERE d.id=?`)
+            .get(fulfilmentDocId)!;
+          return enqueueKnowledgeWork(
+            writer,
+            {
+              id: `confirmation-review-${fulfilmentDocId}`,
+              subjectId: fulfilmentDocId,
+              subjectKind: "source",
+              reason: "review",
+              inputRevision: String(source.revision),
+              tier: "immediate",
+              dueAt: now,
+            },
+            now,
+          ).id;
+        })
+        .immediate();
+    } finally {
+      writer.close();
+    }
+    await waitFor("completed confirmation source review", () =>
+      db.prepare("SELECT 1 FROM knowledge_work WHERE id=? AND status='completed'").get(reviewId)
+        ? true
+        : null,
+    );
+    expect(completedSourceRuns(fulfilmentDocId).length).toBeGreaterThanOrEqual(2);
+    expect(
+      server.calls.filter(
+        (call) =>
+          call.docId === fulfilmentDocId &&
+          call.emitted.kind === "tool" &&
+          call.emitted.name === "observation_note",
+      ),
+    ).toHaveLength(1);
 
     const detail = (await harness.gatewayJson(`/admin/brain/loops/${loop.id}`)) as {
       observations: Array<{ state: string; summary: string; closeReason: string | null }>;

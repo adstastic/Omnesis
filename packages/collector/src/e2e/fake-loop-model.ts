@@ -134,7 +134,7 @@ interface SearchLoopHit {
   state: string;
   docs?: string[];
   /** Open (live/held) observations attached to the loop. */
-  attachedObservations: Array<{ id: string; state: string }>;
+  attachedObservations: Array<{ id: string; state: string; summary?: string }>;
 }
 
 function structuredData(result: unknown): Record<string, unknown> | null {
@@ -422,6 +422,11 @@ function planFor(
   }
 
   if (action.ambiguous) {
+    const summary = action.confirmObservation ?? `Confirm completion of ${action.marker}`;
+    // A source can be offered again after its first interpretation. Adopt the
+    // current confirmation instead of replacing it with an identical note.
+    if (matched.attachedObservations.some((observation) => observation.summary === summary))
+      return [{ name: "open_loop_search", args: { query: action.searchQuery } }];
     // The confirmation replaces whatever the loop already raised, so the
     // morning brief carries one current item for it.
     const supersedes = matched.attachedObservations.map((o) => o.id);
@@ -431,7 +436,7 @@ function planFor(
       {
         name: "observation_note",
         args: {
-          summary: action.confirmObservation ?? `Confirm completion of ${action.marker}`,
+          summary,
           why: "Please confirm this is fully handled.",
           citations: [docId],
           relatedLoopIds: [matched.id],

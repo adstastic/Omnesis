@@ -562,6 +562,48 @@ describe("decideNextTurn", () => {
     });
   });
 
+  test("resolve (ambiguous): a reoffered source adopts its existing current confirmation", () => {
+    const title = "Re: Harborview-lease — got one attachment";
+    const turn = decideNextTurn(
+      history(dataPrompt("created"), [
+        {
+          name: "fetch_many",
+          args: { documents: [{ documentId: DOC_ID }] },
+          result: fetchResult(title),
+        },
+        {
+          name: "open_loop_search",
+          args: { query: "Harborview-lease" },
+          result: searchResult([
+            {
+              id: "loop_9",
+              title: "Send Harborview-lease documents",
+              state: "open",
+              attachedObservations: [
+                {
+                  id: "obs_confirmation",
+                  summary: "Is the Harborview-lease paperwork fully sent?",
+                  state: "live",
+                },
+              ],
+            },
+          ]),
+        },
+        {
+          name: "observation_list",
+          args: {},
+          result: {
+            kind: "structured",
+            resultType: "observation.list",
+            data: { observations: [] },
+          },
+        },
+      ]),
+      behaviors(title, RESOLVE_AMBIGUOUS),
+    );
+    expect(turn.kind, JSON.stringify(turn)).toBe("final");
+  });
+
   test("resolve (ambiguous): notes a confirmation without superseding when the loop has none", () => {
     const title = "Re: Harborview-lease — got one attachment";
     const b = behaviors(title, RESOLVE_AMBIGUOUS);
