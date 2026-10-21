@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { CodexAppServerRuntime } from "@omnesis/agent";
+import { CODEX_RUNTIME_COMPAT, CodexAppServerRuntime } from "@omnesis/agent";
 import { z } from "zod";
 import { CODEX_SUPPORTED_ROLES, type AgentEvent } from "@omnesis/core";
 import { ConfigStore } from "../config-store.js";
@@ -596,9 +596,9 @@ describe("CodexRuntimeService parsers", () => {
       await service.logout();
 
       const setup = service.setupAgent(configStore, "gpt-example-frontier");
+      const setupRejected = expect(setup).rejects.toBeInstanceOf(AgentSetupUnavailableError);
       releaseList();
-      await staleRefresh;
-      await expect(setup).rejects.toBeInstanceOf(AgentSetupUnavailableError);
+      await Promise.all([staleRefresh, setupRejected]);
       expect(configStore.get().inference?.assignments?.agent).toBeUndefined();
       expect(service.snapshot()).toMatchObject({ configured: false, loggedIn: false });
     } finally {
@@ -679,14 +679,14 @@ describe("CodexRuntimeService parsers", () => {
         onPhase?.("verifying");
         return {
           id: "update-1",
-          version: "0.151.0",
+          version: CODEX_RUNTIME_COMPAT.testedVersion,
           stagingDir: join(dir, "staging"),
         };
       },
       commit: async () => {
-        env.OMNESIS_FAKE_CODEX_VERSION = "0.151.0";
+        env.OMNESIS_FAKE_CODEX_VERSION = CODEX_RUNTIME_COMPAT.testedVersion;
         env.OMNESIS_FAKE_CODEX_SCENARIO = "no-tool";
-        return managed("0.151.0");
+        return managed(CODEX_RUNTIME_COMPAT.testedVersion);
       },
       discard: async () => {},
     } as unknown as CodexRuntimeInstaller;
@@ -752,7 +752,7 @@ describe("CodexRuntimeService parsers", () => {
       expect((await service.getRuntimeUpdate()).plan).toMatchObject({
         state: "update-available",
         currentVersion: "0.142.4",
-        targetVersion: "0.151.0",
+        targetVersion: CODEX_RUNTIME_COMPAT.testedVersion,
       });
       expect((await service.startRuntimeUpdate({ dryRun: false })).operation?.state).toBe(
         "checking",
