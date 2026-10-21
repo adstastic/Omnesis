@@ -26,7 +26,7 @@ import {
   call,
   compressCognitionCadences,
   email,
-  preserveCurrentOwner,
+  refreshCurrentOwner,
   ref,
   salienceDecisionPolicy,
   sourceInterpretations,
@@ -319,7 +319,22 @@ describe("brain bench: observations", () => {
       },
       entailment: ({ prompt }) => (prompt.includes(S.insurance.marker) ? "neutral" : "entailment"),
       behaviors: {
-        dynamic: sourceInterpretations({ sources: SOURCES, maintainNode: preserveCurrentOwner }),
+        dynamic: sourceInterpretations({
+          sources: SOURCES,
+          // The review of the allotment observation, once its notice is
+          // deleted: the Brain withdraws it deliberately.
+          maintainNode: (item, ctx, steps) =>
+            item.node?.kind === "observation" &&
+            item.node.validity === "stale" &&
+            item.node.title.includes(S.allotment.marker)
+              ? {
+                  calls: [
+                    call("observation_withdraw", { id: item.node.ownerId }),
+                    call("knowledge_next_frontier", {}),
+                  ],
+                }
+              : refreshCurrentOwner(item, ctx, steps),
+        }),
         behaviors: [
           {
             flavour: "daily.digest",
@@ -460,8 +475,11 @@ describe("brain bench: observations", () => {
     await bench.deleteDoc(allotmentDoc);
     await bench.drainUntilQuiet();
 
-    // A deleted cited document takes its observation with it.
-    expect(await bench.obs.observationsMatching(S.allotment.marker)).toHaveLength(0);
+    // A deleted cited document never takes its observation with it: the
+    // observation loses its citation and is reviewed, and the review withdraws it.
+    const allotment = await bench.obs.observationsMatching(S.allotment.marker);
+    expect(allotment).toHaveLength(1);
+    expect(allotment[0]).toMatchObject({ state: "dropped", closeReason: "withdrawn" });
   }, 240_000);
 
   test("the morning recheck ships, holds and drops by the salience policy and ranks what ships", async () => {
