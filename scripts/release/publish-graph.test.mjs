@@ -6,8 +6,27 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { orderByDependencies, publishGraph } from "./publish-graph.mjs";
+import { orderByDependencies, parsePackReport, publishGraph } from "./publish-graph.mjs";
 import { listPublishablePackages } from "./stage-packages.mjs";
+
+describe("npm pack JSON reports", () => {
+  const packed = { filename: "example-package-1.0.0.tgz", integrity: "sha512-example", files: [] };
+
+  test.each([packed, [packed]])("accepts a single-package report: %j", (report) => {
+    expect(parsePackReport(JSON.stringify(report))).toEqual(packed);
+  });
+
+  test.each([
+    null,
+    {},
+    [],
+    [packed, packed],
+    { filename: packed.filename },
+    { ...packed, integrity: 1 },
+  ])("rejects an incomplete or ambiguous report: %j", (report) => {
+    expect(() => parsePackReport(JSON.stringify(report))).toThrow("no single tarball");
+  });
+});
 
 describe("orderByDependencies", () => {
   const entry = (name, deps = {}, field = "dependencies") => ({

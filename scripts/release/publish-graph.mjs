@@ -78,6 +78,23 @@ export function orderByDependencies(packages) {
   return ordered;
 }
 
+/** Normalize npm's single-package JSON report across CLI versions. */
+export function parsePackReport(stdout) {
+  const report = JSON.parse(stdout);
+  // npm versions report a single packed package either directly or in an array.
+  const packed = Array.isArray(report) && report.length === 1 ? report[0] : report;
+  if (
+    !packed ||
+    typeof packed.integrity !== "string" ||
+    !packed.integrity ||
+    typeof packed.filename !== "string" ||
+    !packed.filename
+  ) {
+    throw new Error("npm pack reported no single tarball");
+  }
+  return packed;
+}
+
 /**
  * `npm pack` one staged directory into `tarballDir`; returns the tarball's
  * path and integrity. The tarball is what gets published, so the registry's
@@ -93,10 +110,7 @@ export async function packStagedPackage(stageDir, tarballDir) {
     // portal run to thousands, well past execFile's default buffer.
     { cwd: stageDir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
   );
-  const [packed] = JSON.parse(stdout);
-  if (!packed?.integrity || !packed?.filename) {
-    throw new Error(`npm pack reported no tarball for ${stageDir}`);
-  }
+  const packed = parsePackReport(stdout);
   return { integrity: packed.integrity, tarball: join(tarballDir, packed.filename) };
 }
 
