@@ -12,15 +12,20 @@ import { listPublishablePackages } from "./stage-packages.mjs";
 describe("npm pack JSON reports", () => {
   const packed = { filename: "example-package-1.0.0.tgz", integrity: "sha512-example", files: [] };
 
-  test.each([packed, [packed]])("accepts a single-package report: %j", (report) => {
-    expect(parsePackReport(JSON.stringify(report))).toEqual(packed);
-  });
+  test.each([packed, [packed], { "example-package": packed }])(
+    "accepts a single-package report: %j",
+    (report) => {
+      expect(parsePackReport(JSON.stringify(report))).toEqual(packed);
+    },
+  );
 
   test.each([
     null,
     {},
     [],
     [packed, packed],
+    { first: packed, second: packed },
+    { "example-package": {} },
     { filename: packed.filename },
     { ...packed, integrity: 1 },
   ])("rejects an incomplete or ambiguous report: %j", (report) => {
