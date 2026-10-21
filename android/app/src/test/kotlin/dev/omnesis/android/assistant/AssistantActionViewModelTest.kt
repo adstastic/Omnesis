@@ -31,6 +31,8 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -270,6 +272,9 @@ class AssistantActionViewModelTest {
         while (vm.state.value !is AssistantActionUiState.Finished && System.currentTimeMillis() < deadline) {
             Thread.sleep(10)
         }
+        val finished = vm.state.value as? AssistantActionUiState.Finished
+        assertNotNull("Capture did not finish; state=${vm.state.value}", finished)
+        assertTrue("Capture failed: $finished", finished!!.successful)
     }
 
     @Test
