@@ -110,7 +110,6 @@ describe("Agent conversation reading anchor", () => {
       render(h(AgentView, { convoId: "convo-1" }), host);
     });
     await vi.waitFor(() => expect(host.querySelector("[data-turn-id]")).not.toBeNull());
-    await act(async () => {});
     return { scroller: host.querySelector(".agent-conversation"), layout };
   }
 
@@ -121,7 +120,8 @@ describe("Agent conversation reading anchor", () => {
       text("user", "Walk me through the travel line."),
       text("assistant", "Travel rose because of the team offsite. ".repeat(60)),
     ]);
-    expect(scroller.scrollTop).toBe(layout.top("a-3") - 8);
+    // The transcript can commit before its passive scroll effect runs.
+    await vi.waitFor(() => expect(scroller.scrollTop).toBe(layout.top("a-3") - 8));
     const reply = scroller.querySelector('[data-turn-id="a-3"]').getBoundingClientRect();
     expect(reply.top).toBeGreaterThanOrEqual(0);
     expect(reply.top).toBeLessThan(VIEWPORT);
@@ -134,6 +134,6 @@ describe("Agent conversation reading anchor", () => {
       text("assistant", "Two lines moved."),
       text("user", "Walk me through the travel line."),
     ]);
-    expect(scroller.scrollTop).toBe(layout.total);
+    await vi.waitFor(() => expect(scroller.scrollTop).toBe(layout.total));
   });
 });

@@ -52,6 +52,8 @@ COPY packages/ packages/
 COPY patches/ patches/
 COPY scripts/native-runtime-preflight.mjs scripts/native-runtime-preflight.mjs
 COPY scripts/ci/npm-ci.sh scripts/ci/npm-ci.sh
+COPY scripts/runtime/ scripts/runtime/
+COPY scripts/release/ scripts/release/
 # The root prepare hook installs git hooks and the root postinstall runs
 # patch-package, a devDependency that `--omit=dev` leaves out. The native-runtime
 # compatibility preinstall remains, as do dependency lifecycle scripts.
@@ -70,6 +72,10 @@ RUN npm pkg delete scripts.prepare scripts.postinstall \
 # build.
 RUN --mount=type=bind,from=workspace-install,source=/app/node_modules,target=/opt/patch-tooling/node_modules \
     node /opt/patch-tooling/node_modules/patch-package/index.js --error-on-fail
+
+# npm can install a workspace dependency locally when its version differs
+# from the hoisted tree. Keep that resolution path in the compiled image.
+RUN node --input-type=module -e 'import { stageWorkspaceDependencies } from "./scripts/runtime/stage-runtime.mjs"; stageWorkspaceDependencies("/opt/workspace-dependencies")'
 
 # ── Hardened runtime base ─────────────────────────────────────────────────────
 # Shared by both daemon images: no JavaScript package managers, a fixed non-root uid/gid,
@@ -96,6 +102,7 @@ WORKDIR /app
 RUN printf '#!/bin/sh\nexec node /app/packages/cli/dist/index.js "$@"\n' > /usr/local/bin/omnesis \
     && chmod 0555 /usr/local/bin/omnesis
 COPY --from=runtime-dependencies /app/node_modules ./node_modules
+COPY --from=runtime-dependencies /opt/workspace-dependencies/packages ./packages
 ENV HOME=/home/omnesis \
     OMNESIS_CONFIG_DIR=/var/lib/omnesis \
     NODE_ENV=production
