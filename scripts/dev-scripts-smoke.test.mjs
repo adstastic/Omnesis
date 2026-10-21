@@ -1895,6 +1895,15 @@ describe("full-validation workflow topology", () => {
     expect(workflow.concurrency).toBeUndefined();
   });
 
+  it("selects a supported Node runtime before topology fixture dependency resolution", () => {
+    const steps = workflows["topology-e2e"].jobs.topology.steps;
+    const setupIndex = steps.findIndex((step) => step.uses?.startsWith("actions/setup-node@"));
+    const laneIndex = steps.findIndex((step) => step.name === "lane [topology]");
+    expect(setupIndex).toBeGreaterThan(-1);
+    expect(setupIndex).toBeLessThan(laneIndex);
+    expect(steps[setupIndex].with["node-version"]).toBe("24");
+  });
+
   it("pins every target checkout and verifies its resolved revision", () => {
     for (const name of validationNames) {
       const workflow = workflows[name];
