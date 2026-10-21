@@ -123,7 +123,13 @@ Re-export shims must use **explicit named re-exports** (`export { X } from …`)
 
 Pairing V4 carries an explicit TLS policy. A public HTTPS origin can use `system`, which requires HTTPS and normal platform WebPKI and hostname verification. A private gateway with its auto-generated self-signed certificate uses `pinned-leaf`; its SHA-256 fingerprint travels in the pairing QR and the native clients validate it on every connection. V1-V3 remain decodable for compatibility, with V3 interpreted as pinned-leaf trust. The collector and CLI consume a private gateway's certificate via `NODE_EXTRA_CA_CERTS`.
 
-The issuer may emit system trust only for an exact configured HTTPS origin; never infer it from a caller-supplied URL. Current QR issuers request the gateway's `auto` policy: the installer's `OMNESIS_PAIRING_SYSTEM_TRUST_ORIGIN`, an exact `gateway.publicBaseUrl` origin, or a `gateway.pairingSystemTrustOrigins` entry emits system trust, while every other address retains the pinned-leaf compatibility path. The installer sets its origin only after `tailscale cert` succeeds and removes it when it hands TLS to mkcert or an operator-managed certificate. Omitted policy remains V2/V3 for older issuers. Native transport construction, the persisted trust mode, the iOS ATS policy, pinned-session plumbing, and the cert SAN list generated in `packages/gateway/src/tls.ts` must stay in sync.
+The issuer may emit system trust only for an exact configured HTTPS origin; never infer it from a caller-supplied URL. Current QR issuers request the gateway's `auto` policy: the installer's `OMNESIS_PAIRING_SYSTEM_TRUST_ORIGIN`, an exact `gateway.publicBaseUrl` origin, or a `gateway.pairingSystemTrustOrigins` entry emits system trust, while every other address retains the pinned-leaf compatibility path. The installer sets its origin only after `tailscale cert` succeeds and removes it when it hands TLS to mkcert or an operator-managed certificate. An omitted policy is treated as `auto`, so a caller that names none never pins a publicly trusted name. Native transport construction, the persisted trust mode, the iOS ATS policy, pinned-session plumbing, and the cert SAN list generated in `packages/gateway/src/tls.ts` must stay in sync.
+
+### Following a certificate renewal
+
+A client that pins the served leaf cannot follow a renewal, because the new certificate has a new key. Every client that pins applies one rule: when the host it connects to is a DNS name (not an IP literal, not `localhost`) and the served chain verifies under the platform's public roots for that exact name, it may switch from the pin to verifying the name. This holds both while the pin still matches and after it stopped matching. The switch persists `system` trust: iOS and Android rewrite the stored pairing, and the OpenClaw and Hermes integrations rewrite `tls` in `integration.json` to `{ "mode": "system" }`. That is the trust a fresh pairing to that origin receives, so it weakens nothing. An IP address, or a pin whose certificate is itself a CA, stays strictly pinned. `omnesis connect` applies the same rule up front, writing `system` trust for a publicly verified name and pinning only otherwise. The pinned shape of `tls` stays `{ caPem, leafFingerprintSha256 }` with no `mode` key, because older plugins rewrite the file on every OAuth rotation and are strict about its keys.
+
+Clients report the result in their hello as `capabilities.tls.mode`. `@omnesis/core` `tls-device-trust.ts` derives which devices pin a certificate the gateway renews or already replaced. The device list, the portal and the doctor (`fleet.tls-pin-renewal`, `fleet.tls-pin-repair`) read that one verdict.
 
 ### Secret-store abstraction and wrapped secret files
 
@@ -938,7 +944,7 @@ Two consequences worth stating, because they are where this gets violated:
 - **A prose `reason` on the wire is addressed to a surface that can act on it.** Clients that only navigate read the booleans instead. A gate must therefore publish enough booleans to tell "this install asked for the feature and it is broken" apart from "this install merely previews it" — otherwise the client either guesses or shows a permanent false alarm on every demo gateway. `BriefsFeatureStatus.enabled` exists for exactly that.
 - **Derive the menu's state into a typed value next to the DTO, not into a branch in the view.** It keeps the blocked states distinguishable under test in the sim-less lane, where a view is not reachable.
 
-- Examples: `ios/Sources/Omnesis/Transport/BriefsClient.swift` (`BriefsMenuEntry`), `ios/Sources/Omnesis/UI/MainMenuDrawer.swift`, `android/app/src/main/kotlin/dev/omnesis/android/ui/home/MainMenuDrawer.kt`, `packages/gateway/src/brain/feature-gate.ts`
+- Examples: `ios/Sources/Omnesis/UI/MainMenuDrawer.swift` and `android/app/src/main/kotlin/dev/omnesis/android/ui/home/MainMenuDrawer.kt` (the queued-notes warning), `packages/gateway/src/brain/feature-gate.ts` (`BriefsFeatureStatus`)
 
 ### Portal tables share one vocabulary
 
@@ -950,22 +956,37 @@ Nothing in the test suite loads the stylesheet, so a rename is only half-checked
 
 - Examples: `packages/gateway/portal/js/views/sweeps.js` (the reference table), `packages/gateway/portal/js/views/policies/policy-library.js`, `packages/gateway/portal/js/views/policies/policy.js`
 
-### Nested Codex inference owns independent capacity
+### Nested subscription-runtime inference owns independent capacity
 
-Codex capability roles share a managed runtime service. Single-shot completions use
-`CodexCompleter`; OCR sends inline images through the same tool-free adapter. An
+Codex and Claude Code capability roles each share one runtime service per
+backend. Single-shot completions use `AgentTurnCompleter`, a fresh tool-free
+agent turn; `AgentTurnOcr` sends inline images through the same adapter. An
 inference turn consumes only the final answer, never progress commentary. Every
 loader respects `allowRemoteInference`, and cached provider signatures include it.
 
-Agent tools can request another model turn before their own turn completes. The
-runtime supervisor binds the parent lease at each tool invocation, routes nested
-turns to a separate bounded pool per depth, and admits active descendants while a
-runtime generation drains. A nested call must never queue behind its caller's
-occupied runtime. Disposal and auth reconciliation cover every generation pool.
+Agent tools can request another model turn before their own turn completes, and
+that nested call must never queue behind its caller's occupied capacity: the
+caller holds a slot while it waits, so sharing it could deadlock.
 
-- Completion adapter: `packages/gateway/src/inference/codex-completer.ts`
-- Runtime admission: `packages/gateway/src/models/codex-generation-supervisor.ts`
-- Capacity and model discovery: `packages/gateway/src/models/codex-runtime-service.ts`
+- **Codex.** The runtime supervisor binds the parent lease at each tool
+  invocation, routes nested turns to a separate bounded pool per depth, and
+  admits active descendants while a runtime generation drains. Disposal and auth
+  reconciliation cover every generation pool.
+- **Claude Code.** Every turn is its own `claude` process, admitted by
+  `ClaudeCodeService` on a semaphore for its lane (`interactive`, `background`,
+  `inference`). Each tool invocation runs inside an `AsyncLocalStorage` scope that
+  is open only while the tool call is in flight; a turn started inside an open
+  scope is nested one level deeper and is admitted on that depth's own semaphore
+  (the inference lane's capacity) instead of its lane's. Work a tool merely
+  schedules and that starts after the call settles counts as top-level again.
+  Depth is capped at the sub-agent nesting cap plus two, beyond which the turn
+  fails rather than queues.
+
+- Completion adapter: `packages/gateway/src/inference/agent-turn-completer.ts`
+- OCR adapter: `packages/gateway/src/ocr/agent-turn-ocr.ts`
+- Codex admission: `packages/gateway/src/models/codex-generation-supervisor.ts`
+- Codex capacity and model discovery: `packages/gateway/src/models/codex-runtime-service.ts`
+- Claude Code admission and status: `packages/gateway/src/models/claude-code-service.ts`
 
 ### `assertNever` for discriminated-union exhaustiveness
 
@@ -1168,3 +1189,14 @@ Every rule below is documented but not machine-checked. Reviewers are expected t
 | `credentialState()` answers from the stored credential, never from a live request                                                                                                                | this doc Layer 1 + `packages/source-sdk/src/define-source.ts` JSDoc             |
 | Navigation menus mark, never explain — diagnostics live on the surface that owns the subject                                                                                                     | this doc Layer 1                                                                |
 | A separately deployed wire contract advertises a version range; no schema pins a single literal                                                                                                  | this doc Layer 1                                                                |
+
+### Source-owned evidence authority
+
+Gateway-internal sources with mixed human and generated material register an
+explicit evidence policy in `packages/gateway/src/sources/evidence-authority.ts`.
+Trusted source writers seal speaker ranges against exact body identity; ordinary
+collector metadata or rendered labels cannot mint those ranges. Shared factual
+consumers ask the registry and fail closed when a required projection is missing.
+They preserve attributed speech as indivisible witnesses and never expand a
+partial read. The semantic `evidenceAuthority` metadata digest participates in
+normal Knowledge source invalidation; its value alone does not grant authority.

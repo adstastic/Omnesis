@@ -235,6 +235,7 @@ export {
   retrustGateway,
   tlsErrorCode,
   type TofuResult,
+  verifiesUnderSystemTrust,
 } from "./tofu.js";
 
 export { retry, type RetryOptions } from "./retry.js";
@@ -697,6 +698,13 @@ export {
   type TlsOwnership,
   type TlsRenewalMode,
 } from "./tls-material.js";
+export {
+  deviceTlsTrust,
+  deviceTlsTrustMode,
+  type DeviceTlsTrust,
+  type TlsTrustDeviceFacts,
+  type TlsTrustSnapshotFacts,
+} from "./tls-device-trust.js";
 
 export {
   extractLinks,
@@ -801,6 +809,7 @@ export type {
   TranscriptionVocabulary,
   TranscriptionVocabularyEntry,
 } from "./transcription.js";
+export { MAX_TRANSCRIPTION_MS } from "./transcription.js";
 
 export type { OcrFn, OcrResult } from "./ocr.js";
 
@@ -1037,6 +1046,12 @@ export type {
   AgentProviderFailureDetail,
   Citation,
 } from "./agent-protocol.js";
+export {
+  AGENT_TOOL_CARDS,
+  type AgentToolCard,
+  type AgentToolIcon,
+  type AgentToolPresentation,
+} from "./agent-tool-cards.js";
 
 // Terminal UX primitives: inline images + OSC 8 hyperlinks, iTerm2-only.
 // Every function returns a string that can be concatenated into normal
@@ -1059,6 +1074,7 @@ export {
   CATALOG_ROLE_CAPABILITY,
   CAPABILITY_ROLES,
   CODEX_SUPPORTED_ROLES,
+  CLAUDE_CODE_SUPPORTED_ROLES,
   CAPABILITY_METADATA,
   CATALOG,
   catalogForRole,
@@ -1096,6 +1112,7 @@ export {
   assertInferenceUrlAllowed,
   classifyInferenceIp,
   fetchWithInferenceUrlPolicy,
+  fetchAllowingSlowResponse,
   BACKGROUND_RATE_LIMIT_PATIENCE,
   rateLimitRetryDelayMs,
   retryRateLimitedRequest,
@@ -1145,9 +1162,12 @@ export type {
   ResolvedUnresolved,
   ResolvedReplay,
   ResolvedCodex,
+  ResolvedClaudeCode,
   ResolvedTypeSafe,
   BackendStatus,
   CodexBackendStatus,
+  ClaudeCodeBackendStatus,
+  ClaudeCodeModelStatus,
   CodexLoginFlow,
   CodexModelStatus,
   CodexRuntimeStatus,

@@ -30,13 +30,13 @@
 
     <meta
       name="description"
-      content="The built-in Omnesis chat agent: what it does, memory, sandboxing, conversations, time zones, model choice, and standing instructions."
+      content="The built-in Omnesis chat agent: what it does, memory, tasks, sandboxing, conversations, time zones, model choice, and standing instructions."
     />
     <link rel="canonical" href="https://omnesis.dev/docs/agent" />
     <meta property="og:title" content="The agent — Omnesis Docs" />
     <meta
       property="og:description"
-      content="The built-in Omnesis chat agent: what it does, memory, sandboxing, conversations, time zones, model choice, and standing instructions."
+      content="The built-in Omnesis chat agent: what it does, memory, tasks, sandboxing, conversations, time zones, model choice, and standing instructions."
     />
     <meta property="og:image" content="https://omnesis.dev/og-image.png" />
     <meta property="og:type" content="website" />
@@ -64,8 +64,6 @@
         <div class="nav-right">
           <ul class="nav-links">
             <li><a href="/">Context Layer</a></li>
-            <li><a href="/brain">Omnesis Brain</a></li>
-            <li><a href="/vision">Vision</a></li>
             <li><a href="/docs/" aria-current="page">Docs</a></li>
             <li><a href="/blog/">Blog</a></li>
           </ul>
@@ -133,6 +131,7 @@
               <ul class="side-sub">
                 <li><a href="#what-it-does">What it does</a></li>
                 <li><a href="#memory">Memory</a></li>
+                <li><a href="#tasks">Tasks</a></li>
                 <li><a href="#sandboxed-by-design">Sandboxed by design</a></li>
                 <li><a href="#conversations">Conversations</a></li>
                 <li><a href="#times-and-time-zones">Times and time zones</a></li>
@@ -159,9 +158,9 @@
         <p class="docs-lead">
           Omnesis has a built-in chat agent that runs inside the gateway. Ask it a question about
           your indexed data and it answers with citations to the source documents. This page is for
-          anyone who chats with it: what it can do, what it remembers, how it is contained, and how
-          to choose the model it runs on. To let an outside AI tool such as Claude, ChatGPT or Codex
-          read your data, see <a href="/docs/connect">Agents &amp; MCP</a>.
+          anyone who chats with it: what it can do, what it remembers, how it keeps your tasks, how
+          it is contained, and how to choose the model it runs on. To let an outside AI tool such as
+          Claude, ChatGPT or Codex read your data, see <a href="/docs/connect">Agents &amp; MCP</a>.
         </p>
 
         <h2 id="what-it-does">What it does</h2>
@@ -195,6 +194,12 @@
           itself. When a hard question splits into substantial independent parts, the agent can fan
           out workers in parallel. Each worker gets a fresh context and the same read-only retrieval
           tools, and reports its evidence; the agent then compares and merges what they found.
+        </p>
+        <p>
+          Recording a document citation requires the agent to fetch its current contents during the
+          turn. Any supplied quote must match the read body exactly. For a partial read, a quote
+          from the returned passage is required. This checks which source was read, not whether
+          every conclusion is correct.
         </p>
         <p>
           For a deliberate, fully orchestrated research pass, type <code>/</code> in the composer
@@ -233,10 +238,29 @@
           Deleting a conversation also removes the annotations that cite it.
         </p>
 
+        <h2 id="tasks">Tasks</h2>
+        <p>
+          In any conversation, the agent works with your <a href="/docs/apps#tasks">Tasks</a> when
+          you ask it to. It can list them, add one, complete, move, strike or edit one, and undo a
+          change it made: “move the dentist call to next week”, “I sent the invoice, tick it off”.
+          It states each change in one line, such as <em>Moved to 2026-10-19: Call the dentist</em>,
+          and the change is recorded in the task's history as made in that conversation, where
+          <strong>Undo</strong> in the Tasks view also reverses it. It changes a task only when you
+          ask; a question about your tasks gets an answer, not an edit.
+        </p>
+        <p>
+          With a model assigned to the <code>background-agent</code> role, notes you capture with
+          Tell Omnesis from the portal, the apps or the CLI are also read and acted on, each by one
+          short agent turn of its own. Reading starts the first time such a model is assigned; notes
+          captured while it is later unassigned are read once it is assigned again. Notes that
+          external agents add, and notes taken in the browser extension, are never acted on. See
+          <a href="/docs/apps#voice-and-quick-capture">Voice and quick capture</a>.
+        </p>
+
         <h2 id="sandboxed-by-design">Sandboxed by design</h2>
         <p>
-          The agent reads your documents and writes only its own memory. Its retrieval tools
-          (search, documents, trails, people, SQL) read and never change anything:
+          The agent reads your documents and writes only its own memory and your tasks. Its
+          retrieval tools (search, documents, trails, people, SQL) read and never change anything:
         </p>
         <ul>
           <li>There is no shell and no filesystem access.</li>
@@ -266,6 +290,37 @@
           Returning to the portal or either mobile app within an hour reopens the conversation you
           were using. After an hour away, Omnesis opens a fresh conversation with the composer
           ready, and the previous one stays in the conversation list.
+        </p>
+        <h3 id="conversation-controls">Questions, follow-ups, and corrections</h3>
+        <p>
+          In portal, iOS, and Android chat, the agent can offer selectable answers when it needs
+          clarification. Choose one or write your own reply in the normal message composer. An
+          unanswered question remains available when you reopen the conversation on another device.
+        </p>
+        <p>
+          You can send a follow-up while an answer is running. The gateway keeps accepted messages
+          together in one queued message. Additional follow-ups grow that message, and the agent
+          receives them together when its current answer finishes. Right-click the queued message in
+          the portal, or long-press it on mobile, and choose <strong>Send now</strong> to interrupt
+          the current answer and send the queue immediately. You can also select the blue
+          <strong>send now</strong> beneath the queued message on all three surfaces. In the portal,
+          <strong>Interrupt and send</strong> stops the current answer and puts your correction
+          ahead of queued follow-ups. Stopping a run does not undo actions it has already completed.
+        </p>
+        <p>
+          The portal, iOS, and Android keep unsent drafts on the device, separately for each
+          conversation. Accepted queued messages stay with the gateway when you close the app. After
+          a gateway restart, opening the conversation resumes queued work; a message interrupted by
+          the restart is shown for review instead of silently repeated. Right-click a message in the
+          portal or long-press it on mobile to open its menu.
+          <strong>Copy</strong> copies a user or agent message to the clipboard. On your own
+          messages, <strong>Edit and resend</strong> appends a corrected prompt and keeps the
+          original exchange in the history.
+        </p>
+        <p>
+          These controls require support from both the app and gateway. An app connected to a
+          gateway without queue support keeps ordinary chat available and offers send once the
+          current answer finishes. Older apps can still answer clarification questions in text.
         </p>
         <h3 id="unread-conversations">Unread conversations and notifications</h3>
         <p>
@@ -343,6 +398,12 @@
             <a href="/docs/operating#models">Operating → Models</a> covers runtime status and
             updates.
           </li>
+          <li>
+            <strong>Claude Code</strong>: the agent runs on your Claude subscription through the
+            <code>claude</code> command you installed and signed in to on the gateway host. There is
+            no API key, and Omnesis never signs in to Claude or reads its credentials. The privacy
+            reviewer can use the same login; see <a href="#claude-code">Claude Code</a> below.
+          </li>
         </ul>
         <div class="term">
           <div class="term-bar"><span></span><span></span><span></span></div>
@@ -381,6 +442,17 @@
               <span class="t-prompt">❯</span>
               <span class="t-cmd">omnesis codex setup-agent MODEL_ID_FROM_STATUS</span>
             </p>
+            <p class="t-dim">
+              # Claude subscription: sign in to Claude Code on the gateway host, then assign
+            </p>
+            <p><span class="t-prompt">❯</span> <span class="t-cmd">claude auth login</span></p>
+            <p>
+              <span class="t-prompt">❯</span> <span class="t-cmd">omnesis claude-code refresh</span>
+            </p>
+            <p>
+              <span class="t-prompt">❯</span>
+              <span class="t-cmd">omnesis claude-code setup-agent sonnet</span>
+            </p>
           </div>
         </div>
         <p>
@@ -398,19 +470,19 @@
           install offers to do this for you (see <a href="/docs/install#first-run">First run</a>).
         </p>
         <p>
-          After assigning an HTTP or Codex model, open its role card in
+          After assigning an HTTP, Codex or Claude Code model, open its role card in
           <strong>Settings → Models</strong> to choose the reasoning settings that model offers,
           such as a reasoning toggle, an effort level or a token budget; see
           <a href="/docs/operating#model-settings">Reasoning settings</a>.
         </p>
         <p>
-          Nothing leaves your machine by default: cloud backends (Anthropic, Codex) and HTTP
-          backends that do not resolve to loopback stay unused until you enable remote inference.
-          Choosing a cloud model in the portal asks you to confirm before enabling this permission
-          and saving the assignment. The permission covers all configured remote inference backends
-          on the gateway; turn off the <strong>Allow cloud inference</strong> switch under
-          <strong>Settings → Models</strong>. Backends, presets, the remote-inference setting, and
-          the other model roles are covered in
+          Nothing leaves your machine by default: cloud backends (Anthropic, Codex, Claude Code) and
+          HTTP backends that do not resolve to loopback stay unused until you enable remote
+          inference. Choosing a cloud model in the portal asks you to confirm before enabling this
+          permission and saving the assignment. The permission covers all configured remote
+          inference backends on the gateway; turn off the
+          <strong>Allow cloud inference</strong> switch under <strong>Settings → Models</strong>.
+          Backends, presets, the remote-inference setting, and the other model roles are covered in
           <a href="/docs/operating#models">Operating → Models</a>.
         </p>
         <p>
@@ -420,6 +492,66 @@
           context, relevant Omnesis data, and tool results to the selected provider when you use the
           agent. After enabling it, use <strong>Retry message</strong> to send a failed message. No
           gateway restart or JSON editing is needed.
+        </p>
+
+        <h3 id="claude-code">Claude Code</h3>
+        <p>
+          The Claude Code backend runs the <code>claude</code> command on the gateway host, Claude
+          Code 2.1.259 or later, so the agent draws on that installation's Claude subscription. An
+          assignment reads <code>claude-code/&lt;model&gt;</code>, where the model is any value
+          <code>claude --model</code> accepts: <code>sonnet</code>, <code>opus</code>,
+          <code>haiku</code>, <code>fable</code> or a full model ID. The model list comes from the
+          installed CLI's own catalog.
+        </p>
+        <p>
+          Omnesis never signs in to Claude, and never stores or reads Claude credentials. Install
+          Claude Code on the gateway host and run <code>claude auth login</code> there as the user
+          the gateway runs as. On a host without a browser, run <code>claude setup-token</code> and
+          export the token it prints as <code>CLAUDE_CODE_OAUTH_TOKEN</code> in the gateway
+          service's environment; <code>CLAUDE_CONFIG_DIR</code> is honoured when your login lives
+          outside <code>~/.claude</code>. API-key variables such as
+          <code>ANTHROPIC_API_KEY</code> are never passed to the CLI, so usage counts against the
+          subscription rather than API billing. Then refresh the backend under
+          <strong>Settings → Models → Backends</strong> (<strong
+            >Add backend → Claude Code → Check again</strong
+          >
+          before it is listed), or with <code>omnesis claude-code refresh</code>. A Claude Code
+          older than 2.1.259 is reported as too old, with the hint to run
+          <code>claude update</code>; refresh again once it is updated.
+        </p>
+        <p>
+          <code>omnesis claude-code setup-agent &lt;model&gt;</code> checks the model against the
+          signed-in CLI, enables remote inference and assigns the model to the agent, only while the
+          agent role is unassigned. <code>omnesis claude-code status</code> shows the installation,
+          sign-in, plan and models. Claude Code is listed among the backends whenever the CLI is
+          signed in; to stop using it, assign the roles that use it to another model. Claude
+          receives the conversation, the relevant Omnesis data and tool results. When a
+          <code>claude</code> command is installed and the agent role is unassigned, an interactive
+          install offers to set this up (see
+          <a href="/docs/install#claude-code-offer">First run</a>).
+        </p>
+        <p>
+          Each turn runs in isolation from the rest of your Claude Code use. It is a fresh
+          <code>claude -p</code> process in an empty working directory that Omnesis owns,
+          <code>claude-code-workspace</code> in the configuration directory. Every built-in Claude
+          Code tool is removed, so the model has no shell, file, web search, web fetch or sub-agent
+          tools. Omnesis loads none of your settings files, so plugins, hooks and MCP servers that
+          settings enable stay off, and your <code>CLAUDE.md</code> files, auto memory, skills and
+          slash commands are not loaded either; Claude Code's own built-in plugins are switched off.
+          Omnesis serves its own tools to the CLI in-process over the CLI's control channel, denies
+          every permission prompt, and does not let Claude Code persist the session. Omnesis checks
+          the session the CLI reports and fails the turn if any tool outside Omnesis is offered or
+          attempted, or if any skill, sub-agent, slash command or plugin from outside the CLI itself
+          was loaded, or if Claude Code runs a hook, a background task or any tool Omnesis did not
+          call. Each turn replays the conversation from Omnesis' own transcript store.
+        </p>
+        <p>
+          Managed policy settings that an administrator installs for Claude Code on the gateway host
+          apply whatever Omnesis asks for. When they make Claude Code run commands of its own
+          (hooks, credential helpers, a status line, plugins or environment variables), Omnesis
+          refuses to run Claude Code and says which settings are in the way. Settings a Claude for
+          Work organization manages from its admin console are not stored on the host, so Omnesis
+          cannot read them; the checks above still stop any tool they would add.
         </p>
 
         <h2 id="standing-instructions">Standing instructions</h2>

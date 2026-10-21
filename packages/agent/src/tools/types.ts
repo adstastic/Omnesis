@@ -19,6 +19,7 @@
 
 import type {
   AgentTerminalFailure,
+  ToolResult,
   AgentUsage,
   DocRef,
   EventTrail,
@@ -49,6 +50,8 @@ export interface SearchPortInput {
    * is enforcement, not advice, and no tool argument exposes it to the model.
    */
   currentConversationId?: string;
+  /** The asker's IANA zone, so the query's own dates ("last week") read in their calendar. */
+  timeZone?: string;
 }
 
 export interface SearchPortFilters {
@@ -59,6 +62,7 @@ export interface SearchPortFilters {
 }
 
 export interface SearchPortResult {
+  coverage?: Extract<ToolResult, { kind: "search.results" }>["coverage"];
   query: string;
   durationMs: number;
   totalCandidates?: number;
@@ -95,6 +99,13 @@ export interface SearchPort {
 // ─── fetch_document ───────────────────────────────────────────────────────
 
 export interface DocumentPortResult {
+  /** Internal authorized snapshot identity; never a claim-support guarantee. */
+  readSnapshot?: {
+    documentId: string;
+    version: string;
+    /** Server-bound qualified page authority, usable only after a complete page read. */
+    fullPageAuthorityVersion?: string;
+  };
   ref: DocRef;
   /** Opaque full document. Renderer reads what it understands. */
   document: unknown;
@@ -110,6 +121,15 @@ export interface DocumentPortResult {
 }
 
 export interface DocumentPort {
+  /** Citation tools require a successful explicit read of the current snapshot. */
+  readonly requiresCitationRead?: boolean;
+  /** This adapter resolves canonical wiki links through the same authorized corpus read. */
+  readonly supportsKnowledgeAliases?: boolean;
+  /**
+   * The `wiki:<nodeId>` reference of a maintained wiki or root page, given the
+   * document id its search hit carries; null for any other document.
+   */
+  knowledgePageRef?(documentId: string): string | null;
   fetch(
     documentId: string,
     opts?: { includeNeighbors?: boolean },
@@ -741,7 +761,26 @@ export interface LoopSearchPortResult {
   durationMs: number;
   loops: ReadonlyArray<LoopSummary>;
 }
+export interface LoopListObservation {
+  receiptId: string;
+  mode: "navigation" | "snapshot";
+  observedAt: string;
+  readScope: {
+    states: readonly ["open", "snoozed"];
+    order: "importance_desc_id_desc";
+    limit: number;
+    population: "accessible_stored_records";
+  };
+}
+export interface LoopListReadIdentity {
+  sessionId: string;
+  messageId: string;
+}
+export interface LoopListReadOptions extends LoopListReadIdentity {
+  mode: "navigation" | "snapshot";
+}
 export interface LoopListPortResult {
+  observation?: LoopListObservation;
   durationMs: number;
   loops: ReadonlyArray<LoopSummary>;
   /** True when more active loops exist than the returned cap. */
@@ -757,6 +796,24 @@ export interface LoopListPortResult {
  * tools (`search_loops`, `fetch_loop`) on this port being wired AND experimental
  * mode. Absent ⇒ neither tool is registered.
  */
+/** Closed diagnostics only; no record IDs, source content or exception messages. */
+export type LoopListValidationFailure =
+  | "missing_observation"
+  | "missing_receipt"
+  | "identity_mismatch"
+  | "payload_mismatch"
+  | "owner_unavailable"
+  | "owner_privacy"
+  | "owner_identity_changed"
+  | "source_unavailable"
+  | "ancestor_unavailable"
+  | "source_changed"
+  | "association_changed"
+  | "proof_changed"
+  | "authority_changed"
+  | "authority_budget"
+  | "validation_error";
+
 export interface LoopReadPort {
   search(input: LoopSearchPortInput, signal?: AbortSignal): Promise<LoopSearchPortResult>;
   /** Full read-only detail of one loop, or null when the id matches nothing. */
@@ -767,7 +824,25 @@ export interface LoopReadPort {
    * tracking / all my open loops" instead of guessing `search` terms (lexical
    * search can silently miss loops).
    */
-  list(limit: number | undefined, signal?: AbortSignal): Promise<LoopListPortResult>;
+  list(
+    limit: number | undefined,
+    signal?: AbortSignal,
+    read?: LoopListReadOptions,
+  ): Promise<LoopListPortResult>;
+  /** Validate the original turn-bound observation, never silently reread a collection. */
+  validateList?(
+    result: LoopListPortResult,
+    identity: LoopListReadIdentity,
+    signal?: AbortSignal,
+    onRefusal?: (category: LoopListValidationFailure) => void,
+  ): Promise<boolean>;
+  /** Trusted recovery only: validate the original snapshot as navigation after
+   * removing all its factual summary/count/ranking support. Never changes the payload. */
+  validateListAsNavigation?(
+    result: LoopListPortResult,
+    identity: LoopListReadIdentity,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
 }
 
 /**

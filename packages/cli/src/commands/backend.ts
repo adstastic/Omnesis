@@ -125,7 +125,7 @@ const backendAddCommand = defineCommand({
       );
     }
 
-    const RESERVED_BACKEND_NAMES = ["local", "anthropic", "codex", "replay"];
+    const RESERVED_BACKEND_NAMES = ["local", "anthropic", "codex", "claude-code", "replay"];
     if (RESERVED_BACKEND_NAMES.includes(name) || name.includes("/")) {
       throw new CliError(
         `${c.red}Backend name "${name}" is reserved or contains '/'.${c.reset}`,
@@ -174,7 +174,7 @@ const backendAddCommand = defineCommand({
     );
     if (remoteUrl && allowRemote) {
       console.log(
-        `${c.yellow}Remote HTTP inference enabled.${c.reset} Omnesis may send document chunks, search queries, agent prompts/tool context, OCR images, and API keys to this backend.`,
+        `${c.yellow}Remote HTTP inference enabled.${c.reset} Omnesis may send document chunks, search queries, agent prompts/tool context, OCR images, recorded audio, and API keys to this backend.`,
       );
     } else if (remoteUrl && !remoteAlreadyAllowed) {
       console.log(

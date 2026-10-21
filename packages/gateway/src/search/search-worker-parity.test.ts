@@ -376,6 +376,31 @@ describe("search worker — real thread parity", () => {
     rmSync(configDir, { recursive: true, force: true });
   });
 
+  test("bounded exact vector candidates match across worker and inline fallback", async () => {
+    const req = noEmbedderRequest();
+    req.embedderPresent = true;
+    req.queryVector = new Float32Array(EMBEDDING_DIM).fill(0.1);
+    const registry = new UsearchReadRegistry(inProcDb, configDir);
+    try {
+      const local = runCandidateGen({ indexDb: inProcDb, usearchRead: registry }, req);
+      const remote = await pool.candidateGen(req);
+      expect(local.stageReports.vector).toMatchObject({
+        status: "ran",
+        engine: "exact",
+        candidates: 3,
+      });
+      expect(remote.stageReports.vector).toMatchObject({
+        status: "ran",
+        engine: "exact",
+        candidates: 3,
+      });
+      expect(remote.results).toEqual(local.results);
+      expect({ ...remote.contentHashByDoc }).toEqual({ ...local.contentHashByDoc });
+    } finally {
+      registry.close();
+    }
+  });
+
   test("worker candidate-gen == in-process candidate-gen (byte-identical pool + hashes)", async () => {
     const req = noEmbedderRequest();
 
@@ -393,6 +418,36 @@ describe("search worker — real thread parity", () => {
     expect({ ...remote.contentHashByDoc }).toEqual({ ...local.contentHashByDoc });
     expect(remote.vectorDegraded).toBe(local.vectorDegraded);
     expect(remote.notices).toEqual(local.notices);
+  });
+
+  test("a temporal lane request crosses to the worker and ranks identically", async () => {
+    const req: CandidateGenRequest = {
+      ...noEmbedderRequest(),
+      temporal: {
+        windows: [{ start: "2026-03-01T00:00:00.000Z", endExclusive: "2026-04-01T00:00:00.000Z" }],
+        eventDocumentIds: ["doc-note-1"],
+        text: "budget",
+        vector: dummyEmbedding,
+        weight: 1,
+      },
+    };
+
+    const local = runCandidateGen(
+      { indexDb: inProcDb, usearchRead: new UsearchReadRegistry(inProcDb, configDir) },
+      req,
+    );
+    const remote = await pool.candidateGen(req);
+
+    expect(remote.results).toEqual(local.results);
+    expect(remote.stageReports.temporal).toEqual(
+      expect.objectContaining({ ...local.stageReports.temporal, durationMs: expect.any(Number) }),
+    );
+    const laneDocs = remote.results
+      .filter((r) => r.scoreBreakdown?.temporalRank !== undefined)
+      .map((r) => r.documentId)
+      .sort();
+    // March by document time, plus the note the time index placed there.
+    expect(laneDocs).toEqual(["doc-chat-1", "doc-email-1", "doc-note-1"]);
   });
 
   test("a worker ranks with the shared in-memory lexical index, identically to FTS5", async () => {

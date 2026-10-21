@@ -55,17 +55,19 @@ public struct AgentView: View {
     /// the environment (previews, snapshot renders) keep working; the
     /// live app injects one at the root.
     @Environment(NotificationRouter.self) private var router: NotificationRouter?
-    @State private var composerText: String = {
-        #if DEBUG
-        // XCUITest demo automation: pre-fill the composer with a prompt
-        // passed via the DEMO_PROMPT environment variable so the test
-        // can skip slow keyboard interaction.
-        if let prompt = ProcessInfo.processInfo.environment["DEMO_PROMPT"] {
-            return prompt
+    /// The composer's unsent words, held by the coordinator with the rest
+    /// of the conversation's state so a new conversation never inherits
+    /// them.
+    private var composerText: String {
+        get { store.agent.composerDraft }
+        nonmutating set {
+            store.agent.updateComposerDraft(newValue, for: loadedDraftKey)
         }
-        #endif
-        return ""
-    }()
+    }
+
+    private var composerTextBinding: Binding<String> {
+        Binding(get: { composerText }, set: { composerText = $0 })
+    }
 
     @State private var scrollToBottomTrigger: Int = 0
     @State private var bottomAnchorMinY: CGFloat = 0
@@ -108,6 +110,8 @@ public struct AgentView: View {
     /// preserves it across SwiftUI's dialog-dismissal callback ordering.
     @State private var conversationDeletion = ConversationDeletionConfirmation()
     @Binding var menuOpen: Bool
+    @State private var loadedDraftKey: String?
+    @State private var editingDraft = false
     @FocusState private var composerFocused: Bool
     /// Monotonic HomeView request used by the one-hour foreground policy.
     /// Passing the value into a newly-mounted AgentView also covers a cold
@@ -217,7 +221,7 @@ public struct AgentView: View {
         .background(sizeProbe)
         .omnesisColorScheme()
         #if DEBUG
-            .demoAutoPilot(composerText: $composerText, citationsOpen: $citationsOpen)
+            .demoAutoPilot(composerText: composerTextBinding, citationsOpen: $citationsOpen)
         #endif
             .onPreferenceChange(ComposerNeedsGutterKey.self) { value in
                 // Mirror the drawer's bottom-band signal into local state.
@@ -244,6 +248,7 @@ public struct AgentView: View {
                 if target != nil { consumeRouterTarget() }
             }
             .onAppear {
+                restoreComposerDraft()
                 consumeRouterTarget()
                 // This surface is the only thing that knows the transcript is
                 // actually rendered. The coordinator's session id outlives a
@@ -254,6 +259,14 @@ public struct AgentView: View {
                 applyComposerFocusRequest()
             }
             .onDisappear { store.agent.agentSurfaceVisibilityChanged(false) }
+            .onChange(of: store.agent.composerDraftKey) { _, _ in restoreComposerDraft() }
+            .task(id: store.agent.sessionId) {
+                guard store.agent.sessionId != nil else { return }
+                while !Task.isCancelled {
+                    await store.agent.refreshConversationControls()
+                    try? await Task.sleep(for: .seconds(2))
+                }
+            }
             .onChange(of: composerFocusRequest) { _, _ in
                 applyComposerFocusRequest()
             }
@@ -321,13 +334,16 @@ public struct AgentView: View {
     }
 
     private func applyComposerFocusRequest() {
+        #if DEBUG
+        // Recording automation owns the pre-filled prompt and keyboard state.
+        guard ProcessInfo.processInfo.environment["DEMO_AUTO_SEND"] == nil else { return }
+        #endif
         let requestedFocus = composerFocusRequest
         guard AgentComposerForegroundFocusPolicy.shouldFocus(
             request: requestedFocus,
             sessionId: store.agent.sessionId,
             canCompose: store.agent.canComposeMessage
         ) else { return }
-        composerText = ""
         // Focus after the fresh AgentView/composer has joined the hierarchy;
         // a synchronous assignment during the tab switch is ignored by UIKit.
         Task { @MainActor in
@@ -531,6 +547,39 @@ public struct AgentView: View {
         }
     }
 
+    private func restoreComposerDraft() {
+        let key = store.agent.composerDraftKey
+        guard loadedDraftKey != key else { return }
+        loadedDraftKey = key
+        editingDraft = store.agent.draftHasBackup(for: key)
+        let saved = store.agent.draft(for: key)
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["DEMO_PROMPT"] != nil, saved.isEmpty, !composerText.isEmpty { return }
+        #endif
+        composerText = saved
+    }
+
+    private func replaceComposerDraft(_ text: String, deepResearch: Bool = false, answerCurrentQuestion: Bool = true) {
+        let key = store.agent.composerDraftKey
+        store.agent.saveDraft(composerText, for: key)
+        store.agent.replaceDraft(text, for: key, deepResearch: deepResearch, answerCurrentQuestion: answerCurrentQuestion)
+        editingDraft = true
+        composerText = text
+    }
+
+    private func submitComposer(_ text: String, command: SlashCommand? = nil) {
+        composerFocused = false
+        Task {
+            let sent = await store.agent.submitDraft(
+                text: text, deepResearch: command?.deepResearch ?? false
+            )
+            if sent, composerText == text {
+                composerText = store.agent.draft(for: store.agent.composerDraftKey)
+                editingDraft = store.agent.draftHasBackup(for: store.agent.composerDraftKey)
+            }
+        }
+    }
+
     private var bottomBar: some View {
         VStack(spacing: 0) {
             // Pinned TODO panel — populated while the agent is working
@@ -542,10 +591,32 @@ public struct AgentView: View {
             AgentPlanPanel(items: store.agent.planItems)
                 .background(Theme.bgPrimary)
 
+            ConversationControlsPanel(
+                controls: store.agent.conversationControls,
+                error: store.agent.submissionError.map {
+                    GatewayErrorView.classify($0).detail(for: "send this message") + " Your draft is saved."
+                },
+                disabled: store.agent.submitting || !store.agent.canComposeMessage,
+                onEdit: { message in
+                    replaceComposerDraft(message.text, deepResearch: message.deepResearch ?? false, answerCurrentQuestion: false)
+                    composerFocused = true
+                },
+                onChoice: { choice in
+                    replaceComposerDraft(choice)
+                    submitComposer(choice)
+                }
+            )
+            if editingDraft {
+                ConversationDraftEditBanner {
+                    store.agent.cancelDraftReplacement(for: store.agent.composerDraftKey)
+                    composerText = store.agent.draft(for: store.agent.composerDraftKey)
+                    editingDraft = false
+                }
+                .disabled(store.agent.submitting)
+            }
             Group {
                 if store.agent.terminalFailure != nil {
                     ContextWindowExceededCard {
-                        composerText = ""
                         composerFocused = false
                         store.agent.newConversation()
                     }
@@ -559,28 +630,14 @@ public struct AgentView: View {
                     }
                 } else {
                     AgentComposer(
-                        text: $composerText,
+                        text: composerTextBinding,
                         busy: store.agent.busy,
-                        disabled: !store.agent.canComposeMessage,
+                        queueEnabled: store.agent.conversationControlsSupported,
+                        disabled: !store.agent.canComposeMessage || store.agent.submitting,
                         experimentalEnabled: store.experimentalEnabled,
+                        idlePrompt: DailyBriefCopy.composerPrompt(for: store.agent.conversationOrigin),
                         speech: speechRecognizer,
-                        onSend: { text, command in
-                            composerText = ""
-                            // Surrender keyboard focus the moment the user
-                            // hits send so the transcript reclaims its full
-                            // screen real estate.
-                            composerFocused = false
-                            let deep = command?.deepResearch ?? false
-                            Task {
-                                let sent = await store.agent.send(text: text, deepResearch: deep)
-                                // A rejected turn (a failed lazy mint or refused POST)
-                                // never reached the gateway — restore
-                                // the text so the user can retry instead of silently
-                                // losing what they typed. Skip if they've already
-                                // started a new message.
-                                if !sent, composerText.isEmpty { composerText = text }
-                            }
-                        },
+                        onSend: { text, command in submitComposer(text, command: command) },
                         onCancel: {
                             Task {
                                 if let restored = await store.agent.cancelTurn(),
@@ -589,8 +646,14 @@ public struct AgentView: View {
                                 }
                             }
                         },
-                        focused: $composerFocused
+                        focused: $composerFocused,
+                        savedCommand: store.agent.draftResearch(for: store.agent.composerDraftKey) ? SlashCommand.all
+                            .first(where: \.deepResearch) : nil,
+                        onCommandChange: { command in
+                            store.agent.saveDraftResearch(command?.deepResearch ?? false, for: store.agent.composerDraftKey)
+                        }
                     )
+                    .id("\(store.agent.composerDraftKey):\(editingDraft)")
                 }
             }
             // Publish the composer's bounds so the transcript's bottom
@@ -627,8 +690,7 @@ public struct AgentView: View {
             // conversation or a blank empty state.
             AgentTranscriptSkeleton()
         } else if showsLanding {
-            // A freshly opened thread with an origin (brief talk-back or a
-            // watch firing) has no visible turns (the
+            // A freshly opened watch thread has no visible turns (the
             // seeded transcript is hidden) but must show its context card,
             // not the generic empty state — so it renders the transcript
             // branch.
@@ -648,7 +710,7 @@ public struct AgentView: View {
             && !store.agent.transcriptLoading
             && store.agent.turns.isEmpty
             && store.agent.terminalFailure == nil
-            && store.agent.briefOrigin.map(AgentCoordinator.hasContextCard) != true
+            && store.agent.conversationOrigin.map(AgentCoordinator.hasContextCard) != true
     }
 
     /// Where the mark's centre sits, as a fraction of the usable height.
@@ -716,14 +778,12 @@ public struct AgentView: View {
                 // real content. The loaded set is bounded by the cursor pages
                 // reached as the user scrolls toward the start.
                 VStack(alignment: .leading, spacing: 14) {
-                    // An anchored thread is a reply to a card, not a blank
-                    // chat: pin the anchor's card above the messages. The
+                    // A watch thread is a reply to a firing, not a blank
+                    // chat: pin the firing's card above the messages. The
                     // folded run transcript that seeded the thread is
                     // hidden (see AgentCoordinator.visibleMessages) — this
                     // card carries that context for the reader instead.
-                    if let snapshot = store.agent.briefOrigin?.brief {
-                        BriefContextCard(snapshot: snapshot)
-                    } else if let origin = store.agent.briefOrigin, let watch = origin.watch {
+                    if let origin = store.agent.conversationOrigin, let watch = origin.watch {
                         WatchFiringContextCard(snapshot: watch, watchId: origin.watchId)
                     }
                     ListPagingFooter(
@@ -766,10 +826,27 @@ public struct AgentView: View {
                             )
                         }
                     }
-                    ForEach(store.agent.turns) { turn in
-                        AgentTurnBubble(turn: turn)
-                            .id(turn.id)
-                            .pagingRowFrame(id: turn.id, in: Self.scrollSpace)
+                    AgentTranscriptTurns(
+                        agent: store.agent,
+                        scrollSpace: Self.scrollSpace,
+                        onEdit: { text in
+                            replaceComposerDraft(text)
+                            composerFocused = true
+                        }
+                    )
+
+                    .environment(\.conversationPresentation, ConversationTranscriptPresentation(
+                        controls: store.agent.conversationControls,
+                        dismissedMessageIds: store.agent.dismissedConversationActivity.messageIds,
+                        dismissedToolCallIds: store.agent.dismissedConversationActivity.toolCallIds
+                    ))
+
+                    if let controls = store.agent.presentedConversationControls, !controls.queued.isEmpty {
+                        ConversationQueuedBubble(
+                            controls: controls,
+                            disabled: !store.agent.canComposeMessage || store.agent.submitting,
+                            onSendNow: { Task { await store.agent.sendQueuedMessagesNow(submissionIds: controls.queued.map(\.id)) } }
+                        )
                     }
 
                     // Turn-level "still working" dots — the single indicator
@@ -1065,10 +1142,14 @@ public struct AgentView: View {
                                 )
                             }
 
-                            Button(role: .destructive) {
-                                conversationDeletion.present(conversationId: sessionId)
-                            } label: {
-                                Label("Delete this chat", systemImage: "trash")
+                            // The Morning brief conversation is a standing
+                            // thread the gateway refuses to delete.
+                            if store.agent.activeConversationDeletable {
+                                Button(role: .destructive) {
+                                    conversationDeletion.present(conversationId: sessionId)
+                                } label: {
+                                    Label("Delete this chat", systemImage: "trash")
+                                }
                             }
                         } label: {
                             Image(systemName: "ellipsis")
@@ -1375,24 +1456,21 @@ private struct TranscriptPrependScrollTarget: Equatable {
 }
 
 /// Reactive bottom-stick controller for the transcript ScrollView.
-///
-/// On iOS 18+ it observes the scroll geometry. The rule:
-///   - When the CONTENT HEIGHT changes (initial load, lazy-row
-///     materialisation, a new turn, streaming tokens) and we are still
-///     stuck to the bottom, re-align to the `__bottom__` sentinel. Because
-///     `scrollTo` clamps to the real maximum offset, this can never land
-///     past the content end, and re-firing on every size change makes it
-///     settle on the true bottom as estimated rows resolve to real heights.
-///   - When only the OFFSET changes (the user dragging) we recompute
-///     `stick`: at/near the end → keep following; dragged away → stop.
-///
-/// On iOS 17 (no `onScrollGeometryChange`) this is inert; the view's
-/// `onChange`/`onAppear` handlers provide best-effort following there.
+/// On iOS 18+ it observes the scroll geometry:
+///   - When the CONTENT HEIGHT changes (initial load, lazy-row materialisation, a new turn, streaming
+///     tokens, content that arrives after the transcript opened) and we are still stuck to the bottom,
+///     re-align to the `__bottom__` sentinel. `scrollTo` clamps to the real maximum offset, so this can
+///     never land past the content end, and re-firing on every size change settles on the true bottom.
+///   - When only the OFFSET changes while the PERSON is scrolling, we recompute `stick`: at/near the
+///     end → keep following; dragged away → stop. An offset the system or a programmatic scroll moves
+///     (the first layout, a safe-area adjustment) never unsticks, or the transcript would open at its top.
+/// On iOS 17 (no `onScrollGeometryChange`) this is inert; `onChange`/`onAppear` follow best-effort there.
 @available(iOS 17.0, *)
 private struct BottomStickController: ViewModifier {
     let proxy: ScrollViewProxy
     @Binding var stick: Bool
     let turnsEmpty: Bool
+    @State private var personScrolling = false
 
     /// How close to the content end still counts as "at the bottom" (pt).
     private static let stickThreshold: CGFloat = 60
@@ -1410,10 +1488,13 @@ private struct BottomStickController: ViewModifier {
                     if stick, !turnsEmpty {
                         proxy.scrollTo("__bottom__", anchor: .bottom)
                     }
-                } else {
-                    // Pure scroll: update whether we are still following.
+                } else if personScrolling {
+                    // The person scrolled: update whether we are still following.
                     stick = new.distanceFromEnd <= Self.stickThreshold
                 }
+            }
+            .onScrollPhaseChange { _, phase in
+                personScrolling = phase == .interacting || phase == .decelerating
             }
         } else {
             content
@@ -1516,49 +1597,56 @@ private struct GlassCircleButton: ViewModifier {
 struct AgentComposer: View {
     @Binding var text: String
     let busy: Bool
+    let queueEnabled: Bool
     let disabled: Bool
-    /// Whether the paired gateway runs in experimental mode. Gates any
-    /// experimental slash commands the extensible command list may add.
+    /// Whether the paired gateway runs in experimental mode; gates experimental slash commands.
     let experimentalEnabled: Bool
+    /// What the empty field says while nothing else is going on.
+    let idlePrompt: String
     var speech: SpeechRecognizer
-    /// The send carries the armed slash command (or `nil` for an ordinary
-    /// turn) so the caller can fold its options (e.g. `deepResearch`) into
-    /// the POST.
+    /// The send carries the armed slash command (or `nil` for an ordinary turn) so
+    /// the caller can fold its options (e.g. `deepResearch`) into the POST.
     let onSend: (String, SlashCommand?) -> Void
     let onCancel: () -> Void
+    let onCommandChange: (SlashCommand?) -> Void
     var focused: FocusState<Bool>.Binding
 
-    /// The per-message armed slash command. Local compose-time state: it
-    /// governs the NEXT send only and is cleared on submit (or by the pill's
-    /// `×`), so it never leaks into the following turn. Seeding it is the only
-    /// way to arm Deep Research — there is no implicit auto-gating.
+    /// The per-message armed slash command. Local compose-time state: it governs the NEXT send
+    /// only and is cleared on submit (or by the pill's `×`), so it never leaks into the following
+    /// turn. Seeding it is the only way to arm Deep Research — there is no implicit auto-gating.
     @State private var armedCommand: SlashCommand?
 
     init(
         text: Binding<String>,
         busy: Bool,
+        queueEnabled: Bool = false,
         disabled: Bool,
         experimentalEnabled: Bool = false,
+        idlePrompt: String = "Ask Omnesis",
         speech: SpeechRecognizer,
         onSend: @escaping (String, SlashCommand?) -> Void,
         onCancel: @escaping () -> Void,
         focused: FocusState<Bool>.Binding,
-        previewArmedCommand: SlashCommand? = nil
+        previewArmedCommand: SlashCommand? = nil,
+        savedCommand: SlashCommand? = nil,
+        onCommandChange: @escaping (SlashCommand?) -> Void = { _ in }
     ) {
         self._text = text
         self.busy = busy
+        self.queueEnabled = queueEnabled
         self.disabled = disabled
         self.experimentalEnabled = experimentalEnabled
+        self.idlePrompt = idlePrompt
         self.speech = speech
         self.onSend = onSend
         self.onCancel = onCancel
         self.focused = focused
-        self._armedCommand = State(initialValue: previewArmedCommand)
+        self._armedCommand = State(initialValue: savedCommand ?? previewArmedCommand)
+        self.onCommandChange = onCommandChange
     }
 
-    /// Whether the slash menu is open, and which commands it lists. Derived
-    /// from `text` via `matchSlashCommands` on every keystroke, over the
-    /// command set available for the gateway's current feature mode.
+    /// Whether the slash menu is open, and which commands it lists. Derived from `text` via
+    /// `matchSlashCommands` on every keystroke, over the commands the gateway's mode offers.
     private var menu: SlashMenuState {
         matchSlashCommands(
             text,
@@ -1597,9 +1685,19 @@ struct AgentComposer: View {
                     .onSubmit { submit() }
                     .accessibilityIdentifier("agentComposer")
 
-                    trailingButton
-                        .padding(.trailing, 10)
-                        .padding(.bottom, 14)
+                    HStack(spacing: 8) {
+                        if busy, canSend {
+                            Button(action: onCancel) {
+                                Image(systemName: "stop.circle.fill")
+                                    .font(.system(size: 30))
+                                    .foregroundStyle(Theme.danger)
+                            }
+                            .accessibilityLabel("Stop the agent")
+                        }
+                        trailingButton
+                    }
+                    .padding(.trailing, 10)
+                    .padding(.bottom, 14)
                 }
             }
             // Liquid Glass pill: on iOS 26 it's real glass — the
@@ -1615,6 +1713,7 @@ struct AgentComposer: View {
         .animation(.easeInOut(duration: 0.2), value: speech.isListening)
         .animation(.easeInOut(duration: 0.2), value: armedCommand)
         .animation(.easeInOut(duration: 0.18), value: menu.isOpen)
+        .onChange(of: armedCommand) { _, command in onCommandChange(command) }
         .onChange(of: speech.transcript) { _, newValue in
             if speech.isListening {
                 text = newValue
@@ -1636,7 +1735,7 @@ struct AgentComposer: View {
 
     @ViewBuilder
     private var trailingButton: some View {
-        if busy {
+        if busy, !canSend || !queueEnabled {
             Button(action: onCancel) {
                 Image(systemName: "stop.circle.fill")
                     .font(.system(size: 30))
@@ -1668,7 +1767,7 @@ struct AgentComposer: View {
                     .foregroundStyle(Theme.accent)
             }
             .accessibilityIdentifier("agentSendButton")
-            .accessibilityLabel("Send")
+            .accessibilityLabel(busy ? "Queue follow-up" : "Send")
         } else {
             // Empty text, not busy — show mic button.
             Button {
@@ -1768,27 +1867,26 @@ struct AgentComposer: View {
 
     private var placeholder: String {
         if disabled { return "Connecting…" }
-        if busy { return "Working…" }
+        if busy { return "Add a follow-up…" }
         if speech.isListening { return "Listening…" }
         if armedCommand != nil { return "Describe what to research…" }
-        return "Ask Omnesis"
+        return idlePrompt
     }
 
     private var canSend: Bool {
-        !busy && !disabled && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        (!busy || queueEnabled) && !disabled && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func submit() {
-        // Keep Return-key submission inert while Stop is visible. The field
-        // intentionally stays editable so a follow-up can be drafted, then
-        // submitted once the gateway's terminal event clears `busy`.
-        guard !busy, !disabled else { return }
+        guard !disabled, !busy || queueEnabled else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let command = armedCommand
         // Per-message: the pill governs THIS send only, then clears.
         armedCommand = nil
-        onSend(trimmed, command)
+        // Keep the exact binding snapshot for acknowledgement reconciliation;
+        // the coordinator trims only the outbound message.
+        onSend(text, command)
     }
 }
 
@@ -1915,6 +2013,23 @@ struct AgentComposer: View {
         previewWidth: 1366
     )
     .environment(AppStore.preview(agentPreview: PreviewMocks.agentRichTranscript))
+}
+
+@available(iOS 17.0, *)
+#Preview("Composer — queued follow-up") {
+    @Previewable @State var text = PreviewMocks.conversationFollowupDraft
+    @Previewable @FocusState var focused: Bool
+    AgentComposer(
+        text: $text,
+        busy: true,
+        queueEnabled: true,
+        disabled: false,
+        speech: SpeechRecognizer.preview(state: .idle),
+        onSend: { _, _ in },
+        onCancel: {},
+        focused: $focused
+    )
+    .background(Theme.bgPrimary)
 }
 
 @available(iOS 17.0, *)

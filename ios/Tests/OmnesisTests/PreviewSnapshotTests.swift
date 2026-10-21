@@ -2990,280 +2990,6 @@ final class PreviewSnapshotTests: XCTestCase {
         snapshot(RootView().environment(store), name: "61-rootview-onboarding")
     }
 
-    // MARK: - Briefs feed
-
-    /// The Briefs list: every card glanceable at once — unread dot +
-    /// semibold title on fresh briefs, plain-text one-line descriptions,
-    /// relative times. The first row is marked viewed so both row states
-    /// render side by side.
-    func testBriefsListPopulated() {
-        var feed = BriefsFeedState(briefs: PreviewMocks.briefs)
-        _ = feed.markViewed(id: PreviewMocks.briefs.first?.id ?? "")
-        let view = NavigationStack {
-            BriefsListContent(
-                feed: feed,
-                loading: false,
-                loadError: nil,
-                onOpen: { _ in },
-                onQuickClear: { _ in },
-                onAsk: { _ in },
-                onMoreOptions: { _ in },
-                onRetry: {},
-                onRefresh: {},
-                paging: CursorPagingState(nextCursor: "preview-next")
-            )
-            .navigationTitle("Briefs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
-        }
-        snapshot(view, name: "113-briefs-list-populated")
-    }
-
-    /// A parked background agent does not cover or replace historical briefs.
-    /// The amber banner stays above the populated feed and links to setup.
-    func testBriefsListNeedsBackgroundAgent() {
-        let view = NavigationStack {
-            BriefsListContent(
-                feed: BriefsFeedState(briefs: PreviewMocks.briefs),
-                loading: false,
-                loadError: nil,
-                onOpen: { _ in },
-                onQuickClear: { _ in },
-                onAsk: { _ in },
-                onMoreOptions: { _ in },
-                onRetry: {},
-                onRefresh: {},
-                showsModelWarning: true
-            )
-            .navigationTitle("Briefs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
-        }
-        snapshot(view, name: "130-briefs-list-needs-background-agent")
-    }
-
-    /// A never-configured install can have no historical cards; the warning
-    /// still leaves the empty-state message centered in the remaining space.
-    func testBriefsListEmptyNeedsBackgroundAgent() {
-        let view = NavigationStack {
-            BriefsListContent(
-                feed: BriefsFeedState(briefs: []),
-                loading: false,
-                loadError: nil,
-                onOpen: { _ in },
-                onQuickClear: { _ in },
-                onAsk: { _ in },
-                onMoreOptions: { _ in },
-                onRetry: {},
-                onRefresh: {},
-                showsModelWarning: true
-            )
-            .navigationTitle("Briefs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
-        }
-        snapshot(view, name: "131-briefs-list-empty-needs-background-agent")
-    }
-
-    /// Detail sheet while the talk-back thread is opening: spinner in
-    /// the talk button's circle.
-    func testBriefDetailOpeningThread() {
-        let view = BriefDetailSheet(
-            brief: PreviewMocks.briefLoop,
-            store: AppStore.preview(sources: PreviewMocks.sources),
-            openingThread: true
-        )
-        .environment(AppStore.preview(sources: PreviewMocks.sources))
-        snapshot(view, name: "125-brief-detail-opening-thread")
-    }
-
-    /// Detail sheet mid-dictation: the mic is the accent-filled pulsing
-    /// circle and the live transcript renders under the action row.
-    func testBriefDetailDictating() {
-        let view = BriefDetailSheet(
-            brief: PreviewMocks.briefInfo,
-            store: AppStore.preview(sources: PreviewMocks.sources),
-            speech: SpeechRecognizer.preview(
-                state: .listening,
-                transcript: "Push the reminder to Friday and tell Maya I confirmed"
-            )
-        )
-        .environment(AppStore.preview(sources: PreviewMocks.sources))
-        snapshot(view, name: "132-brief-detail-dictating")
-    }
-
-    /// The stacked detail sheet's content: title, markdown description,
-    /// glass action row, divider, long-form body + citations.
-    func testBriefDetailSheet() {
-        let view = BriefDetailSheet(
-            brief: PreviewMocks.briefLoop,
-            store: AppStore.preview(sources: PreviewMocks.sources)
-        )
-        .environment(AppStore.preview(sources: PreviewMocks.sources))
-        snapshot(view, name: "114-brief-detail-sheet")
-    }
-
-    /// The health-trends brief, opened. Also the still the website's Brain
-    /// page shows — `scripts/shot-website-brief.sh` renders this one case and
-    /// copies the PNG into `website/media/`, so the site never carries a
-    /// hand-drawn mock of a screen the app does not produce.
-    func testBriefDetailHealthTrend() {
-        let view = BriefDetailSheet(
-            brief: PreviewMocks.briefHealthRecovery,
-            store: AppStore.preview(sources: PreviewMocks.sources)
-        )
-        .environment(AppStore.preview(sources: PreviewMocks.sources))
-        // A shorter canvas than the default 393x852: this brief's content ends
-        // around 640pt, and the website places the render inside a phone beside
-        // three paragraphs — a full-length screen towers over them.
-        snapshot(view, name: "140-brief-detail-health-trend", size: CGSize(width: 393, height: 760))
-    }
-
-    /// A row transformed into the recording strip (swipe-mic dictation):
-    /// accent mic circle, live transcript, send affordance.
-    func testBriefsListRowDictating() {
-        let view = NavigationStack {
-            BriefsListContent(
-                feed: BriefsFeedState(briefs: PreviewMocks.briefs),
-                loading: false,
-                loadError: nil,
-                onOpen: { _ in },
-                onQuickClear: { _ in },
-                onAsk: { _ in },
-                onDictate: { _ in },
-                onMoreOptions: { _ in },
-                speech: SpeechRecognizer.preview(
-                    state: .listening,
-                    transcript: "Push the reminder to Friday and tell Maya I confirmed"
-                ),
-                dictatingBriefId: PreviewMocks.briefs.first?.id,
-                onRetry: {},
-                onRefresh: {}
-            )
-            .navigationTitle("Briefs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
-        }
-        snapshot(view, name: "133-briefs-list-row-dictating")
-    }
-
-    func testBriefsListEmpty() {
-        let view = NavigationStack {
-            BriefsListContent(
-                feed: BriefsFeedState(briefs: []),
-                loading: false,
-                loadError: nil,
-                onOpen: { _ in },
-                onQuickClear: { _ in },
-                onAsk: { _ in },
-                onMoreOptions: { _ in },
-                onRetry: {},
-                onRefresh: {}
-            )
-            .navigationTitle("Briefs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
-        }
-        snapshot(view, name: "115-briefs-feed-empty")
-    }
-
-    func testBriefsListEmptyPageLoading() {
-        let view = NavigationStack {
-            BriefsListContent(
-                feed: BriefsFeedState(briefs: []),
-                loading: false,
-                loadError: nil,
-                onOpen: { _ in },
-                onQuickClear: { _ in },
-                onAsk: { _ in },
-                onMoreOptions: { _ in },
-                onRetry: {},
-                onRefresh: {},
-                paging: CursorPagingState(
-                    nextCursor: "preview-next",
-                    isLoadingMore: true
-                )
-            )
-            .navigationTitle("Briefs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
-        }
-        snapshot(view, name: "115a-briefs-feed-empty-page-loading")
-    }
-
-    func testBriefsListError() {
-        let view = NavigationStack {
-            BriefsListContent(
-                feed: BriefsFeedState(briefs: []),
-                loading: false,
-                loadError: URLError(.cannotConnectToHost),
-                onOpen: { _ in },
-                onQuickClear: { _ in },
-                onAsk: { _ in },
-                onMoreOptions: { _ in },
-                onRetry: {},
-                onRefresh: {}
-            )
-            .environment(AppStore.preview())
-            .navigationTitle("Briefs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
-        }
-        snapshot(view, name: "116-briefs-feed-error")
-    }
-
-    /// The brief card pinned above a talk-back thread's messages —
-    /// description-only variant (no long-form body, so no details fold).
-    func testBriefContextCardDescriptionOnly() {
-        let view = ScrollView {
-            BriefContextCard(
-                snapshot: BriefOriginSnapshot(
-                    title: "Return the borrowed projector",
-                    description: "You told **Maya** you'd bring the projector back to Studio Northstar this week.",
-                    body: nil
-                )
-            )
-            .padding()
-        }
-        .background(Theme.bgPrimary)
-        snapshot(view, name: "126-brief-context-card-description-only")
-    }
-
-    /// Long-form body present but collapsed behind "Show details" — the
-    /// default state the thread opens in.
-    func testBriefContextCardCollapsedBody() {
-        let view = ScrollView {
-            BriefContextCard(
-                snapshot: BriefOriginSnapshot(
-                    title: "Marathon entry closes Friday 17 Oct",
-                    description: "The **marathon** early-bird entry closes on Friday — you said you wanted in this year.",
-                    body: PreviewMocks.briefLongBody
-                )
-            )
-            .padding()
-        }
-        .background(Theme.bgPrimary)
-        snapshot(view, name: "127-brief-context-card-collapsed")
-    }
-
-    /// A long title wrapping across lines, dark mode, with a markdown
-    /// body — the extremes of the card's text layout.
-    func testBriefContextCardLongTitleDark() {
-        let view = ScrollView {
-            BriefContextCard(
-                snapshot: BriefOriginSnapshot(
-                    title: "Confirm the Q4 budget review agenda with Jamie Lopez before Thursday's planning meeting",
-                    description: "Jamie asked for the agenda by **Thursday 09:00** and the shared doc still has last quarter's items.",
-                    body: "The draft agenda lives in the shared planning doc."
-                )
-            )
-            .padding()
-        }
-        .background(Theme.bgPrimary)
-        .environment(\.colorScheme, .dark)
-        snapshot(view, name: "128-brief-context-card-long-title-dark")
-    }
-
     /// Interactive-memory action with its outcome row frozen visible.
     func testEphemeralActionCardDone() {
         let view = ScrollView {
@@ -3425,125 +3151,6 @@ final class PreviewSnapshotTests: XCTestCase {
         )
     }
 
-    /// The below-the-fold half of a card: long-form body ending in
-    /// tappable citations (source icon + title each). In the feed this
-    /// region only exists past the scroll fold, so it gets its own
-    /// direct render.
-    func testBriefsDetailsSection() {
-        let view = ScrollView {
-            BriefDetailsSection(
-                brief: PreviewMocks.briefLoop,
-                store: AppStore.preview(sources: PreviewMocks.sources),
-                onOpenCitation: { _ in }
-            )
-            .padding(.top, Theme.Spacing.lg)
-        }
-        .background(Theme.bgPrimary)
-        snapshot(view, name: "120-briefs-details-section")
-    }
-
-    /// A row whose Loop-Agent-authored description carries markdown:
-    /// `**bold**` must render as plain text in the row (markers
-    /// stripped), while the detail sheet renders real emphasis — both
-    /// covered here via the row list.
-    func testBriefsListMarkdownRow() {
-        let view = NavigationStack {
-            BriefsListContent(
-                feed: BriefsFeedState(briefs: [PreviewMocks.briefMarkdown, PreviewMocks.briefReminder]),
-                loading: false,
-                loadError: nil,
-                onOpen: { _ in },
-                onQuickClear: { _ in },
-                onAsk: { _ in },
-                onMoreOptions: { _ in },
-                onRetry: {},
-                onRefresh: {}
-            )
-            .navigationTitle("Briefs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
-        }
-        snapshot(view, name: "121-briefs-list-markdown-row")
-    }
-
-    /// The below-the-fold body rendered from markdown: the bullet list,
-    /// inline emphasis, and the link must render as formatted content
-    /// rather than raw `-`/`**`/`[]()` syntax.
-    func testBriefsDetailsSectionMarkdown() {
-        let view = ScrollView {
-            BriefDetailsSection(
-                brief: PreviewMocks.briefMarkdown,
-                store: AppStore.preview(sources: PreviewMocks.sources),
-                onOpenCitation: { _ in }
-            )
-            .padding(.top, Theme.Spacing.lg)
-        }
-        .background(Theme.bgPrimary)
-        snapshot(view, name: "122-briefs-details-section-markdown")
-    }
-
-    /// Loop-kind dismiss modal with the snooze section open: reasons
-    /// read "Already handled" (never "Acknowledged") + the four
-    /// re-surface choices.
-    func testBriefsDismissSheetLoopSnooze() {
-        let view = BriefDismissSheet(
-            brief: PreviewMocks.briefLoop,
-            initialReason: .snoozed
-        ) { _, _, _ in }
-        snapshot(view, name: "117-briefs-dismiss-loop-snooze")
-    }
-
-    /// Info-kind dismiss modal: reasons read "Acknowledged" (never
-    /// "Already handled"), nothing selected yet, Dismiss disabled.
-    func testBriefsDismissSheetInfo() {
-        let view = BriefDismissSheet(brief: PreviewMocks.briefInfo) { _, _, _ in }
-        snapshot(view, name: "118-briefs-dismiss-info")
-    }
-
-    /// Briefs-active gateway: the Briefs row appears directly under
-    /// Search. The other drawer
-    /// snapshots (76–79) omit it entirely.
-    func testMainMenuDrawerBriefs() {
-        let store = AppStore.preview(
-            statusSnapshot: PreviewMocks.statusSnapshotBriefsActive,
-            agentPreview: PreviewMocks.agentConversationsRich
-        )
-        let view = ZStack(alignment: .leading) {
-            Theme.bgDrawer.ignoresSafeArea()
-            MainMenuDrawer(
-                isOpen: .constant(true),
-                selection: .constant(.agent),
-                onOpenSettings: {}
-            )
-            .frame(width: MenuReveal.menuWidth(forContainerWidth: 393), alignment: .leading)
-        }
-        snapshot(view.environment(store), name: "119-main-menu-drawer-briefs")
-    }
-
-    /// Briefs switched on but its background-agent model cannot run: the row
-    /// stays, carrying the drawer's amber attention triangle. Queued notes are
-    /// installed too, so the drawer's other warning row renders at the same
-    /// time — the one state where the two shapes of the shared affordance (a
-    /// marker inside the row, and Tell Omnesis's separately-tappable triangle)
-    /// can be compared for alignment.
-    func testMainMenuDrawerBriefsNeedsAttention() {
-        let store = AppStore.preview(
-            statusSnapshot: PreviewMocks.statusSnapshotBriefsNeedsAttention,
-            agentPreview: PreviewMocks.agentConversationsRich
-        )
-        store.notes.installPreviewState(pending: PreviewMocks.pendingNotes)
-        let view = ZStack(alignment: .leading) {
-            Theme.bgDrawer.ignoresSafeArea()
-            MainMenuDrawer(
-                isOpen: .constant(true),
-                selection: .constant(.agent),
-                onOpenSettings: {}
-            )
-            .frame(width: MenuReveal.menuWidth(forContainerWidth: 393), alignment: .leading)
-        }
-        snapshot(view.environment(store), name: "191-main-menu-drawer-briefs-needs-attention")
-    }
-
     // MARK: - Theme + components
 
     func testThemePalette() {
@@ -3690,6 +3297,231 @@ final class PreviewSnapshotTests: XCTestCase {
         )
         XCTAssertTrue(store.agent.busy)
         XCTAssertEqual(store.agent.turns.count, 1)
+    }
+
+    func testConversationEmptyControls() {
+        snapshot(
+            VStack(spacing: 0) {
+                ConversationControlsPanel(controls: nil, error: nil, disabled: false, onChoice: { _ in })
+                AgentComposer(
+                    text: .constant(""),
+                    busy: false,
+                    disabled: false,
+                    speech: SpeechRecognizer.preview(state: .idle),
+                    onSend: { _, _ in },
+                    onCancel: {},
+                    focused: FocusState<Bool>().projectedValue
+                )
+            }.background(Theme.bgPrimary),
+            name: "72f-conversation-empty-controls",
+            size: CGSize(
+                width: 393,
+                height: 140
+            )
+        )
+    }
+
+    func testConversationEditDraft() {
+        snapshot(
+            VStack(spacing: 0) {
+                ConversationDraftEditBanner(onCancel: {})
+                AgentComposer(
+                    text: .constant(PreviewMocks.conversationFollowupDraft),
+                    busy: false,
+                    disabled: false,
+                    speech: SpeechRecognizer.preview(state: .idle),
+                    onSend: { _, _ in },
+                    onCancel: {},
+                    focused: FocusState<Bool>().projectedValue
+                )
+            }.background(Theme.bgPrimary),
+            name: "72e-conversation-edit-draft",
+            size: CGSize(
+                width: 393,
+                height: 220
+            )
+        )
+    }
+
+    func testConversationQueueHandoff() {
+        queueHandoffSnapshot(automatic: false)
+    }
+
+    func testConversationAutomaticQueueHandoff() {
+        queueHandoffSnapshot(automatic: true)
+    }
+
+    private func queueHandoffSnapshot(automatic: Bool) {
+        let controls = PreviewMocks.conversationControls
+        var handoff = ConversationQueueHandoff()
+        if automatic {
+            handoff.delivered(ids: controls.queued.map(\.id))
+        } else {
+            _ = handoff.begin(ids: controls.queued.map(\.id))
+        }
+        let presented = handoff.presenting(controls)
+        snapshot(
+            VStack(spacing: 20) {
+                AgentTurnBubble(turn: .user(id: "wire-message", text: controls.queuedText))
+                if !presented.queued.isEmpty {
+                    ConversationQueuedBubble(controls: presented, disabled: false, onSendNow: {})
+                }
+                AgentComposer(
+                    text: .constant(""),
+                    busy: true,
+                    queueEnabled: true,
+                    disabled: false,
+                    speech: SpeechRecognizer.preview(state: .idle),
+                    onSend: { _, _ in },
+                    onCancel: {},
+                    focused: FocusState<Bool>().projectedValue
+                )
+            }.padding(16).background(Theme.bgPrimary),
+            name: automatic ? "72k-conversation-automatic-queue-handoff" : "72h-conversation-queue-handoff",
+            size: CGSize(width: 393, height: 300)
+        )
+    }
+
+    func testConversationBusyFollowupComposer() {
+        snapshot(
+            AgentComposer(
+                text: .constant(PreviewMocks.conversationFollowupDraft),
+                busy: true,
+                queueEnabled: true,
+                disabled: false,
+                speech: SpeechRecognizer.preview(state: .idle),
+                onSend: { _, _ in },
+                onCancel: {},
+                focused: FocusState<Bool>().projectedValue
+            ).background(Theme.bgPrimary),
+            name: "72b-conversation-busy-followup",
+            size: CGSize(
+                width: 393,
+                height: 220
+            )
+        )
+    }
+
+    func testConversationRestoredDraftComposer() {
+        snapshot(
+            AgentComposer(
+                text: .constant(PreviewMocks.conversationFollowupDraft),
+                busy: false,
+                queueEnabled: true,
+                disabled: false,
+                speech: SpeechRecognizer.preview(state: .idle),
+                onSend: { _, _ in },
+                onCancel: {},
+                focused: FocusState<Bool>().projectedValue
+            ).background(Theme.bgPrimary),
+            name: "72c-conversation-restored-draft",
+            size: CGSize(
+                width: 393,
+                height: 180
+            )
+        )
+    }
+
+    func testConversationSubmissionFailure() {
+        snapshot(
+            ConversationControlsPanel(
+                controls: nil,
+                error: "Message not confirmed. Retry to check delivery.",
+                disabled: false,
+                onChoice: { _ in }
+            ),
+            name: "72d-conversation-submission-failure",
+            size: CGSize(
+                width: 393,
+                height: 150
+            )
+        )
+    }
+
+    func testConversationClarificationTranscript() {
+        snapshot(
+            VStack(spacing: 20) {
+                AgentTurnBubble(turn: PreviewMocks.conversationClarificationTurn)
+                    .environment(\.conversationPresentation, ConversationTranscriptPresentation(
+                        controls: PreviewMocks.conversationControls
+                    ))
+                ConversationQueuedBubble(controls: PreviewMocks.conversationControls, disabled: false, onSendNow: {})
+                ConversationControlsPanel(controls: PreviewMocks.conversationControls, error: nil, disabled: false, onChoice: { _ in })
+                AgentComposer(
+                    text: .constant("My answer"),
+                    busy: false,
+                    queueEnabled: true,
+                    disabled: false,
+                    speech: SpeechRecognizer.preview(state: .idle),
+                    onSend: { _, _ in },
+                    onCancel: {},
+                    focused: FocusState<Bool>().projectedValue
+                )
+            }.padding(16),
+            name: "72f-conversation-clarification-transcript",
+            size: CGSize(width: 393, height: 650)
+        )
+    }
+
+    func testConversationInterruptedActivity() {
+        var aborted = PreviewMocks.agentToolCallSearchManyRunning
+        aborted.result = .error(code: "turn_aborted", message: "Interrupted")
+        snapshot(
+            VStack(spacing: 20) {
+                AgentTurnBubble(turn: .assistant(AgentAssistantTurn(
+                    id: "prior-turn", parts: [
+                        .text("The earlier answer remains available."),
+                        .thinking("Checking more documents"),
+                        .tool(aborted),
+                        .subagent(AgentSubagentCard(
+                            subagentId: "worker",
+                            specialist: "generic",
+                            title: "Comparing totals",
+                            task: "Compare totals",
+                            parentToolCallId: "spawn"
+                        )),
+                    ]
+                )))
+                .environment(\.conversationPresentation, ConversationTranscriptPresentation(dismissedMessageIds: ["prior-turn"]))
+                AgentTurnBubble(turn: .user(id: "followup", text: "Include a short summary."))
+                ConversationControlsPanel(
+                    controls: nil, error: "Couldn’t send yet. Your queued message is saved.", disabled: false, onChoice: { _ in }
+                )
+            }.padding(16),
+            name: "72g-conversation-interrupted-activity",
+            size: CGSize(width: 393, height: 400)
+        )
+    }
+
+    func testConversationChoicesAndQueue() {
+        snapshot(
+            VStack(spacing: 24) {
+                AgentTurnBubble(turn: .user(id: "original", text: "Compare this month's activity."))
+                ConversationQueuedBubble(
+                    controls: PreviewMocks.conversationControls,
+                    disabled: false,
+                    onSendNow: {}
+                )
+                ConversationControlsPanel(
+                    controls: PreviewMocks.conversationControls,
+                    error: nil,
+                    disabled: false,
+                    onChoice: { _ in }
+                )
+                AgentComposer(
+                    text: .constant("My answer"),
+                    busy: false,
+                    queueEnabled: true,
+                    disabled: false,
+                    speech: SpeechRecognizer.preview(state: .idle),
+                    onSend: { _, _ in },
+                    onCancel: {},
+                    focused: FocusState<Bool>().projectedValue
+                )
+            }.padding(.horizontal, 16),
+            name: "72a-conversation-choices-queue",
+            size: CGSize(width: 393, height: 650)
+        )
     }
 
     func testAgentBusyStreaming() {
@@ -4033,28 +3865,6 @@ final class PreviewSnapshotTests: XCTestCase {
         snapshot(view.environment(store), name: "82-menu-reveal-closed")
     }
 
-    /// Open over a different section, with the experimental rows present —
-    /// the most navigation rows the menu ever carries.
-    func testMenuRevealOpenOverBriefs() {
-        let store = AppStore.preview(
-            statusSnapshot: PreviewMocks.statusSnapshotExperimental,
-            agentPreview: PreviewMocks.agentConversationsRich
-        )
-        let view = MenuRevealContainer(isOpen: .constant(true)) {
-            MainMenuDrawer(
-                isOpen: .constant(true),
-                selection: .constant(.briefs),
-                onOpenSettings: {}
-            )
-        } content: {
-            BriefsView(menuOpen: .constant(true))
-        }
-        snapshot(
-            view.environment(store).environment(store.notificationRouter),
-            name: "83-menu-reveal-briefs"
-        )
-    }
-
     /// A history long enough to overflow the menu, so the action bar actually
     /// has content passing behind it: this is what proves the fade reads and
     /// that the bar's inset keeps the last row reachable rather than stranding
@@ -4250,6 +4060,24 @@ final class PreviewSnapshotTests: XCTestCase {
         }
         .environment(store)
         snapshot(view, name: "78-agent-ephemeral-document-slot")
+    }
+
+    func testAgentEphemeralWikiRead() {
+        let store = AppStore.preview(agentPreview: .init())
+        for (call, index, name) in [
+            (PreviewMocks.agentToolCallWikiReadRunning, nil as Int?, "78c-agent-ephemeral-wiki-running"),
+            (PreviewMocks.agentToolCallWikiReadComplete, 1, "78d-agent-ephemeral-wiki-slot"),
+        ] {
+            let view = NavigationStack {
+                ScrollView {
+                    AgentEphemeralDocumentCard(call: call, initialIndex: index, freeze: true)
+                        .padding()
+                }
+                .background(Theme.bgPrimary)
+            }
+            .environment(store)
+            snapshot(view, name: name)
+        }
     }
 
     func testAgentEphemeralPeopleSlot() {
@@ -6654,27 +6482,6 @@ final class PreviewSnapshotTests: XCTestCase {
 
     // MARK: - Main menu drawer
 
-    /// The Briefs drawer row carries an unread-count badge when the feature
-    /// is enabled and the count is non-zero (in-app only, no OS badge). This
-    /// parked state also checks the warning and badge share the trailing row.
-    func testMainMenuDrawerBriefsBadge() {
-        let store = AppStore.preview(
-            statusSnapshot: PreviewMocks.statusSnapshotBriefsNeedsAttention,
-            briefsUnreadCount: 3,
-            agentPreview: PreviewMocks.agentConversationsRich
-        )
-        let view = ZStack(alignment: .leading) {
-            Theme.bgDrawer.ignoresSafeArea()
-            MainMenuDrawer(
-                isOpen: .constant(true),
-                selection: .constant(.agent),
-                onOpenSettings: {}
-            )
-            .frame(width: MenuReveal.menuWidth(forContainerWidth: 393), alignment: .leading)
-        }
-        snapshot(view.environment(store), name: "99-main-menu-drawer-briefs-badge")
-    }
-
     /// Privacy is an ungated row, and carries the count of decisions waiting
     /// on the owner so a held answer is not found only by going looking.
     func testMainMenuDrawerPrivacyBadge() {
@@ -7896,6 +7703,545 @@ final class PreviewSnapshotTests: XCTestCase {
         }
         .environment(AppStore.preview())
         snapshot(view, name: "112u-privacy-exchange-traces", size: CGSize(width: 393, height: 2200))
+    }
+
+    // MARK: - Tasks
+
+    /// Today's page: chips carrying each view's open count, the date
+    /// heading, a carried task first, today's tasks, and what was done or
+    /// struck today, struck through, and the bar's Tell Omnesis button (a
+    /// microphone with a plus badge) at the top right. A stable gateway has
+    /// no Suggested segment, shows no proposal and no review banner.
+    func testTasksToday() {
+        let view = NavigationStack {
+            TasksContent(model: .fixture(
+                tasks: PreviewMocks.tasksToday,
+                counts: PreviewMocks.tasksTodayCounts,
+                now: PreviewMocks.tasksNow
+            ))
+            .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+            .toolbar { TasksToolbar(menuOpen: .constant(false)) }
+        }
+        .environment(AppStore.preview())
+        snapshot(view, name: "310-tasks-today", size: CGSize(width: 393, height: 1500))
+    }
+
+    /// Today on an experimental gateway: the Suggested segment with its
+    /// count, one task carrying the Brain's "thinks this is done" proposal
+    /// with Confirm / Keep, and the review banner at the foot of the page.
+    func testTasksTodayExperimental() {
+        let view = NavigationStack {
+            TasksContent(
+                model: .fixture(
+                    tasks: PreviewMocks.tasksToday,
+                    counts: PreviewMocks.tasksTodayCounts,
+                    now: PreviewMocks.tasksNow
+                ),
+                experimental: true
+            )
+            .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+            .toolbar { TasksToolbar(menuOpen: .constant(false)) }
+        }
+        .environment(AppStore.preview())
+        snapshot(view, name: "310a-tasks-today-experimental", size: CGSize(width: 393, height: 1500))
+    }
+
+    /// The Undo toast of the last change pinned at the bottom of Today.
+    func testTasksTodayUndoToast() {
+        let view = NavigationStack {
+            TasksContent(model: .fixture(
+                tasks: PreviewMocks.tasksToday,
+                counts: PreviewMocks.tasksTodayCounts,
+                toast: TaskToast(
+                    id: 1,
+                    text: "Done: Book the Q4 budget review room",
+                    undoSeq: 12,
+                    isError: false
+                ),
+                now: PreviewMocks.tasksNow
+            ))
+            .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+            .toolbar { TasksToolbar(menuOpen: .constant(false)) }
+        }
+        .environment(AppStore.preview())
+        snapshot(view, name: "311-tasks-today-undo-toast", size: CGSize(width: 393, height: 1100))
+    }
+
+    /// One suggestion waiting: the review banner speaks in the singular, at
+    /// the top of the page above the day's tasks.
+    func testTasksTodayOneSuggestion() {
+        let view = NavigationStack {
+            TasksContent(
+                model: .fixture(
+                    tasks: PreviewMocks.tasksToday,
+                    counts: PreviewMocks.tasksOneSuggestionCounts,
+                    now: PreviewMocks.tasksNow
+                ),
+                experimental: true
+            )
+            .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+            .toolbar { TasksToolbar(menuOpen: .constant(false)) }
+        }
+        .environment(AppStore.preview())
+        snapshot(view, name: "310b-tasks-today-one-suggestion", size: CGSize(width: 393, height: 1500))
+    }
+
+    /// A phone-sized window with a task's action fan open, as `fan` asks.
+    private func renderFan(
+        _ name: String,
+        selected: TaskViewKind = .today,
+        tasks: [TaskRecord] = PreviewMocks.tasksToday,
+        fan: TaskFanPreview,
+        experimental: Bool = false,
+        dynamicType: DynamicTypeSize = .large
+    ) {
+        let view = NavigationStack {
+            TasksContent(
+                model: .fixture(
+                    selected: selected,
+                    tasks: tasks,
+                    counts: PreviewMocks.tasksTodayCounts,
+                    now: PreviewMocks.tasksNow
+                ),
+                experimental: experimental,
+                initialFan: fan
+            )
+            .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { TasksToolbar(menuOpen: .constant(false)) }
+            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+        }
+        .environment(AppStore.preview())
+        .environment(\.dynamicTypeSize, dynamicType)
+        renderInWindow(view, name: name, settle: 1.2)
+        renderInWindow(view, name: "\(name)-light", scheme: .light, settle: 1.2)
+    }
+
+    /// A long press on a title towards the right, slid onto Tomorrow: the
+    /// list dims around the lit row, the column rises up and to the left of
+    /// the thumb in its fixed order with Done nearest, and the dashed ring
+    /// marks where the finger pressed.
+    func testTasksFanMain() {
+        renderFan(
+            "320-tasks-fan-main",
+            fan: TaskFanPreview(taskId: PreviewMocks.taskWithPerson.id, pressedAt: 0.72, highlight: .tomorrow)
+        )
+    }
+
+    /// The month fan after resting on Other month…: Back nearest the
+    /// thumb, months with their year, Later at the far end.
+    func testTasksFanMonths() {
+        renderFan(
+            "321-tasks-fan-months",
+            selected: .month,
+            tasks: PreviewMocks.tasksMonth,
+            fan: TaskFanPreview(
+                taskId: PreviewMocks.tasksMonth[6].id,
+                mode: .months(page: 0),
+                highlight: .month("2027-02")
+            )
+        )
+    }
+
+    /// The lowest visible row of a long Month page: the fan rises from near
+    /// the bottom edge and stays on screen.
+    func testTasksFanNearBottom() {
+        renderFan(
+            "322-tasks-fan-near-bottom",
+            selected: .month,
+            tasks: PreviewMocks.tasksMonth,
+            fan: TaskFanPreview(taskId: PreviewMocks.tasksMonth[8].id, highlight: .done)
+        )
+    }
+
+    /// A row near the top at a larger text size, the finger still on the
+    /// press point: the column flips downwards (same order, mirrored), still
+    /// to the left of the thumb, nothing highlighted.
+    func testTasksFanNearTopLargeText() {
+        renderFan(
+            "323-tasks-fan-near-top-large-text",
+            fan: TaskFanPreview(taskId: PreviewMocks.taskCarried.id),
+            dynamicType: .xxxLarge
+        )
+    }
+
+    /// The Brain's suggestions on an experimental gateway: the same rows as
+    /// the person's own tasks, each with a dashed circle that marks it already
+    /// done; the Suggested chip carries the waiting count.
+    func testTasksSuggested() {
+        let view = NavigationStack {
+            TasksContent(
+                model: .fixture(
+                    selected: .suggested,
+                    tasks: PreviewMocks.tasksSuggested,
+                    counts: PreviewMocks.tasksTodayCounts,
+                    now: PreviewMocks.tasksNow
+                ),
+                experimental: true
+            )
+            .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { TasksToolbar(menuOpen: .constant(false)) }
+            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+        }
+        .environment(AppStore.preview())
+        snapshot(view, name: "312-tasks-suggested")
+    }
+
+    /// A page of the pager on its own — Month, as a swipe from Today draws
+    /// it in — and a page whose read-ahead has not landed yet, which shows a
+    /// spinner rather than claiming the view is empty.
+    func testTasksJournalPages() {
+        let month = TaskJournalPage(
+            model: .fixture(
+                selected: .month,
+                tasks: PreviewMocks.tasksMonth,
+                counts: PreviewMocks.tasksTodayCounts,
+                now: PreviewMocks.tasksNow
+            ),
+            view: .month
+        )
+        .environment(AppStore.preview())
+        snapshot(month, name: "313a-tasks-page-month", size: CGSize(width: 393, height: 1100))
+        let unread = TaskJournalPage(
+            model: .fixture(tasks: PreviewMocks.tasksToday, counts: PreviewMocks.tasksTodayCounts, now: PreviewMocks.tasksNow),
+            view: .future
+        )
+        .environment(AppStore.preview())
+        snapshot(unread, name: "313b-tasks-page-not-yet-read", size: CGSize(width: 393, height: 600))
+    }
+
+    /// An empty Today: heading, the empty state's guidance, and the Tell
+    /// Omnesis line.
+    func testTasksEmpty() {
+        let view = NavigationStack {
+            TasksContent(model: .fixture(tasks: [], now: PreviewMocks.tasksNow))
+                .navigationTitle("Tasks")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { TasksToolbar(menuOpen: .constant(false)) }
+                .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+        }
+        .environment(AppStore.preview())
+        snapshot(view, name: "313-tasks-empty")
+    }
+
+    /// The largest accessibility text size: rows and chips wrap rather than
+    /// clip.
+    func testTasksTodayAccessibilityText() {
+        let view = NavigationStack {
+            TasksContent(model: .fixture(
+                tasks: Array(PreviewMocks.tasksToday.prefix(3)),
+                counts: PreviewMocks.tasksTodayCounts,
+                now: PreviewMocks.tasksNow
+            ))
+            .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { TasksToolbar(menuOpen: .constant(false)) }
+        }
+        .environment(AppStore.preview())
+        .environment(\.dynamicTypeSize, .accessibility3)
+        snapshot(view, name: "314-tasks-today-accessibility-text", size: CGSize(width: 393, height: 1800))
+    }
+
+    /// One task's history: its facts, then each change with where it came
+    /// from — the conversation one is a link back into that conversation.
+    func testTaskHistory() {
+        let view = NavigationStack {
+            TaskHistoryContent(
+                detail: TaskDetail(task: PreviewMocks.taskCarried, history: PreviewMocks.taskHistory, undoSeq: 41),
+                today: "2026-10-14",
+                onOpenConversation: { _ in }
+            )
+            .navigationTitle("History")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+        }
+        .background(Theme.bgPrimary)
+        .environment(AppStore.preview())
+        snapshot(view, name: "315-task-history")
+    }
+
+    /// The details sheet a tap on a task's text opens: flat on the page
+    /// background, its fields prefilled from a task with a plan and a
+    /// deadline, each document under its source's icon, and History.
+    func testTaskEditor() {
+        let view = TaskEditorSheet(
+            task: PreviewMocks.taskProposal,
+            today: "2026-10-14",
+            model: .fixture(tasks: [PreviewMocks.taskProposal])
+        ) { _ in true }
+            .environment(AppStore.preview(sourceIconByType: ["gmail": PreviewMocks.agentSourceLayoutIcon]))
+        snapshot(view, name: "316-task-editor", size: CGSize(width: 393, height: 1100))
+    }
+
+    /// "Done + note" is the Tell Omnesis screen completing a task: it opens
+    /// listening, the transcript landing in the same field.
+    func testTaskNoteComposerListening() {
+        let view = CaptureView(
+            completion: .completing(PreviewMocks.taskWithPerson.title) { _ in true },
+            speech: .preview(state: .listening, transcript: "Went through it together, she signs on Friday"),
+            previewText: "Went through it together, she signs on Friday"
+        )
+        .environment(AppStore.preview())
+        snapshot(view, name: "324-task-note-composer-listening")
+    }
+
+    /// "Done + note" after the person stopped dictation to type: the same
+    /// typing state Tell Omnesis has.
+    func testTaskNoteComposerTyping() {
+        let view = CaptureView(
+            completion: .completing(PreviewMocks.taskWithPerson.title) { _ in true },
+            speech: .preview(state: .idle),
+            previewText: "Signed and scanned, copy sent to the club"
+        )
+        .environment(AppStore.preview())
+        snapshot(view, name: "324a-task-note-composer-typing")
+    }
+
+    /// "Accept with note" on a suggestion is the same Tell Omnesis screen,
+    /// worded for accepting it.
+    func testTaskNoteComposerAccepting() {
+        let view = CaptureView(
+            completion: .accepting(PreviewMocks.tasksSuggested[0].title) { _ in true },
+            speech: .preview(state: .idle),
+            previewText: "Jamie needs it by Friday, pay from the joint account"
+        )
+        .environment(AppStore.preview())
+        snapshot(view, name: "324b-task-note-composer-accepting")
+    }
+
+    /// A long press on a suggestion: its fan offers Accept nearest the
+    /// thumb, then Accept with note, Accept for…, Mark as done and Ignore.
+    func testTasksSuggestionFan() {
+        renderFan(
+            "325-tasks-suggestion-fan",
+            selected: .suggested,
+            tasks: PreviewMocks.tasksSuggestedLong,
+            fan: TaskFanPreview(taskId: PreviewMocks.tasksSuggestedLong[4].id, highlight: .acceptWithNote),
+            experimental: true
+        )
+    }
+
+    /// Resting on Accept for…: Back nearest, then the times to accept the
+    /// suggestion for, soonest first.
+    func testTasksSuggestionFanWhen() {
+        renderFan(
+            "325a-tasks-suggestion-fan-when",
+            selected: .suggested,
+            tasks: PreviewMocks.tasksSuggestedLong,
+            fan: TaskFanPreview(taskId: PreviewMocks.tasksSuggestedLong[5].id, mode: .when, highlight: .tomorrow),
+            experimental: true
+        )
+    }
+
+    /// A gateway that serves Tasks: the Tasks row sits under Search and reads
+    /// "Tasks (4)" for today's open tasks, and the Morning brief
+    /// conversation heads the list, marked by its sunrise glyph.
+    func testMainMenuDrawerTasksAndMorningBrief() {
+        let store = AppStore.preview(
+            statusSnapshot: PreviewMocks.statusSnapshotTasks,
+            tasksTodayCount: 4,
+            agentPreview: PreviewMocks.agentConversationsWithMorningBrief
+        )
+        let view = ZStack(alignment: .leading) {
+            Theme.bgDrawer.ignoresSafeArea()
+            MainMenuDrawer(
+                isOpen: .constant(true),
+                selection: .constant(.tasks),
+                onOpenSettings: {}
+            )
+            .frame(width: MenuReveal.menuWidth(forContainerWidth: 393), alignment: .leading)
+        }
+        snapshot(view.environment(store), name: "317-main-menu-drawer-tasks-morning-brief")
+    }
+
+    /// The conversation list with the Morning brief row. Its long-press menu
+    /// offers no Delete (covered by `ConversationSummaryOriginTests`; a
+    /// context menu does not render in a still).
+    func testAgentConversationsMorningBrief() {
+        let store = AppStore.preview(agentPreview: PreviewMocks.agentConversationsWithMorningBrief)
+        let view = NavigationStack { AgentConversationsListView() }
+        snapshot(view.environment(store), name: "318-agent-conversations-morning-brief")
+    }
+
+    // MARK: - Morning brief conversation
+
+    private static let dailyBriefCanvas = CGSize(width: 393, height: 1400)
+
+    /// Today open under its header with what it was based on listed — the
+    /// sources and tasks — and the two earlier days folded to one line each.
+    func testDailyBriefTodayOpen() {
+        snapshot(
+            DailyBriefTranscriptPreview(model: DailyBriefTranscriptPreview.model()),
+            name: "330-daily-brief-today-open",
+            size: Self.dailyBriefCanvas
+        )
+    }
+
+    /// The reader folded today's "Based on" list.
+    func testDailyBriefTodayListFolded() {
+        let model = DailyBriefTranscriptPreview.model { $0.toggleFooter(PreviewMocks.dailyBriefOrigin.briefs[2]) }
+        snapshot(
+            DailyBriefTranscriptPreview(model: model),
+            name: "331-daily-brief-today-list-folded",
+            size: Self.dailyBriefCanvas
+        )
+    }
+
+    /// Yesterday opened from its folded line: its brief and replies, its list
+    /// closed; Monday still folded, now counting its items.
+    func testDailyBriefYesterdayOpened() {
+        let model = DailyBriefTranscriptPreview.model(pages: PreviewMocks.dailyBriefPages) {
+            $0.toggleDay(PreviewMocks.dailyBriefOrigin.briefs[1])
+        }
+        snapshot(
+            DailyBriefTranscriptPreview(model: model),
+            name: "332-daily-brief-yesterday-opened",
+            size: CGSize(width: 393, height: 1800)
+        )
+    }
+
+    /// Today's items could not be read: a quiet Retry line, the brief intact.
+    func testDailyBriefItemsFailed() {
+        let model = DailyBriefTranscriptPreview.model(pages: []) { $0.showForPreview(.failed, day: "2026-10-14") }
+        snapshot(
+            DailyBriefTranscriptPreview(model: model),
+            name: "333-daily-brief-items-failed",
+            size: Self.dailyBriefCanvas
+        )
+    }
+
+    /// Today's items on their way.
+    func testDailyBriefItemsLoading() {
+        let model = DailyBriefTranscriptPreview.model(pages: []) { $0.showForPreview(.loading, day: "2026-10-14") }
+        snapshot(
+            DailyBriefTranscriptPreview(model: model),
+            name: "333b-daily-brief-items-loading",
+            size: Self.dailyBriefCanvas
+        )
+    }
+
+    /// The thumbs under an item, one PNG per state: untouched, useful, not
+    /// interested with the words given, a factual error with its correction,
+    /// and a reaction the gateway refused — put back, with the reason.
+    func testDailyBriefReactionStates() {
+        for state in PreviewMocks.dailyBriefReactionStates {
+            let view = VStack(alignment: .leading, spacing: 0) {
+                DailyBriefReactionBar(item: state.item, failure: state.failure) { _, _, _ in true }
+                Spacer()
+            }
+            .padding(Theme.Spacing.lg)
+            .background(Theme.bgSecondary)
+            snapshot(view, name: "333c-daily-brief-reaction-\(state.name)", size: CGSize(width: 393, height: 120))
+        }
+    }
+
+    /// "Why not?" after "Not interested": the item's sentence under the
+    /// heading, the words optional.
+    func testDailyBriefWhyNotCapture() {
+        let view = CaptureView(
+            completion: .explainingDisinterest(PreviewMocks.dailyBriefToday.items[2].summary) { _ in true },
+            speech: .preview(state: .idle)
+        )
+        .environment(AppStore.preview())
+        snapshot(view, name: "333d-daily-brief-why-not-capture")
+    }
+
+    /// "What's wrong?" after "Factual error", with a correction typed.
+    func testDailyBriefCorrectionCapture() {
+        let view = CaptureView(
+            completion: .correcting(PreviewMocks.dailyBriefToday.items[0].summary) { _ in true },
+            speech: .preview(state: .idle),
+            previewText: "The reply is due next Wednesday, not Friday"
+        )
+        .environment(AppStore.preview())
+        snapshot(view, name: "333e-daily-brief-correction-capture")
+    }
+
+    /// The largest accessibility text size: separators, header, list and
+    /// chips wrap rather than clip.
+    func testDailyBriefAccessibilityText() {
+        snapshot(
+            DailyBriefTranscriptPreview(model: DailyBriefTranscriptPreview.model())
+                .environment(\.dynamicTypeSize, .accessibility3),
+            name: "334-daily-brief-accessibility-text",
+            size: CGSize(width: 393, height: 2600)
+        )
+    }
+
+    /// The whole surface as it opens: the transcript at its latest brief, the
+    /// list showing, and the composer inviting a reply about today.
+    func testDailyBriefConversation() {
+        let view = AgentView(menuOpen: .constant(false))
+            .environment(AppStore.preview(agentPreview: PreviewMocks.dailyBriefSeed))
+            .environment(\.dailyBriefContext, PreviewMocks.dailyBriefContext)
+        renderInWindow(view, name: "335-daily-brief-conversation", settle: 1.2)
+        renderInWindow(view, name: "335-daily-brief-conversation-light", scheme: .light, settle: 1.2)
+    }
+
+    /// The parts on their own: separators folded and fixed, the folded line,
+    /// the header, and the footer loading, failed and open.
+    func testDailyBriefParts() {
+        let view = VStack(alignment: .leading, spacing: 14) {
+            DailyBriefDaySeparator(day: "2026-10-12", label: "Mon 12 Oct", spokenLabel: "Monday 12 October", isOpen: false)
+            DailyBriefFoldedRow(day: "2026-10-12", summary: "Morning brief · 2 things · 1 reply", onOpen: {})
+            DailyBriefDaySeparator(day: "2026-10-13", label: "Yesterday", spokenLabel: "Yesterday", isOpen: true)
+            DailyBriefDaySeparator(day: "2026-10-14", label: "Today", spokenLabel: "Today", isOpen: nil)
+            DailyBriefHeader(time: "07:02")
+            DailyBriefHeader(time: nil)
+            DailyBriefFooter(day: "2026-10-14", state: .loading, isOpen: true, onToggle: {}, onRetry: {})
+            DailyBriefFooter(day: "2026-10-14", state: .failed, isOpen: true, onToggle: {}, onRetry: {})
+            DailyBriefFooter(
+                day: "2026-10-14",
+                state: .loaded(PreviewMocks.dailyBriefYesterday),
+                isOpen: false,
+                onToggle: {},
+                onRetry: {}
+            )
+            Spacer()
+        }
+        .padding(Theme.Spacing.lg)
+        .background(Theme.bgPrimary)
+        snapshot(NavigationStack { view }.environment(AppStore.preview()), name: "336-daily-brief-parts")
+    }
+
+    /// Open over the Tasks section, with the experimental rows present — the
+    /// most navigation rows the menu ever carries.
+    func testMenuRevealOpenOverTasks() {
+        let store = AppStore.preview(
+            statusSnapshot: PreviewMocks.statusSnapshotExperimentalWithTasks,
+            tasksTodayCount: 4,
+            agentPreview: PreviewMocks.agentConversationsRich
+        )
+        let view = MenuRevealContainer(isOpen: .constant(true)) {
+            MainMenuDrawer(
+                isOpen: .constant(true),
+                selection: .constant(.tasks),
+                onOpenSettings: {}
+            )
+        } content: {
+            TasksScreen(
+                model: .fixture(
+                    tasks: PreviewMocks.tasksToday,
+                    counts: PreviewMocks.tasksTodayCounts,
+                    now: PreviewMocks.tasksNow
+                ),
+                experimental: true,
+                menuOpen: .constant(true)
+            )
+        }
+        snapshot(
+            view.environment(store).environment(store.notificationRouter),
+            name: "83-menu-reveal-tasks"
+        )
     }
 }
 

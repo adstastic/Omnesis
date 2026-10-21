@@ -103,6 +103,10 @@ export interface IoGate {
    * document. The hero picture of where the Brain stands — and a full grouped
    * scan, so it lives out here beside the backlog count.
    */
+  knowledgeDiscoveryByMonth(
+    notBefore: string,
+    excludedSources?: readonly string[],
+  ): Promise<import("../brain/knowledge/discovery-timeline.js").KnowledgeDiscoveryMonth[]>;
   bootstrapCorpusByMonth(
     recencyFloor: string,
     todayIso: string,
@@ -451,6 +455,11 @@ const COMPUTE_OP_DEFS: readonly IoOpDef[] = [
   { name: "io.countDocuments", priority: "background" },
   // Heavy budget: this one is a corpus scan by nature, so the slow-op alarm
   // should fire on a genuine outlier rather than on every call.
+  {
+    name: "io.knowledgeDiscoveryByMonth",
+    priority: "background",
+    latencyBudgetMs: HEAVY_BUDGET_MS,
+  },
   { name: "io.bootstrapBacklog", priority: "background", latencyBudgetMs: HEAVY_BUDGET_MS },
   {
     name: "io.bootstrapCorpusByMonth",
@@ -578,6 +587,8 @@ export function ioGateFromScheduler(scheduler: Scheduler): IoGate {
       call("io.planSourceUrlRecanonicalization", [specs, cursor]),
     countDocuments: () => call("io.countDocuments", []),
     bootstrapBacklog: (recencyFloor) => call("io.bootstrapBacklog", [recencyFloor]),
+    knowledgeDiscoveryByMonth: (notBefore, excludedSources = []) =>
+      call("io.knowledgeDiscoveryByMonth", [notBefore, [...excludedSources]]),
     bootstrapCorpusByMonth: (recencyFloor, todayIso) =>
       call("io.bootstrapCorpusByMonth", [recencyFloor, todayIso]),
     conversationRetentionCandidates: (files, cutoffMs) =>

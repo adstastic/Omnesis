@@ -64,8 +64,6 @@
         <div class="nav-right">
           <ul class="nav-links">
             <li><a href="/">Context Layer</a></li>
-            <li><a href="/brain">Omnesis Brain</a></li>
-            <li><a href="/vision">Vision</a></li>
             <li><a href="/docs/" aria-current="page">Docs</a></li>
             <li><a href="/blog/">Blog</a></li>
           </ul>
@@ -171,6 +169,16 @@
           surfaces near the top.
         </p>
         <p>
+          Small indexed scopes use bounded exact vector scoring, so unrelated source updates do not
+          change their nearest-neighbor ranking. Larger scopes use approximate search; its recall
+          can change as the index evolves. Visibility and source filters apply to both.
+        </p>
+        <p>
+          During a backfill, completed indexing pages become searchable while later pages are still
+          processing. Results remain incomplete until indexing catches up; a completed scan can
+          still contain documents that were skipped or could not be embedded.
+        </p>
+        <p>
           Keyword matching ranks from a copy of the full-text index that the gateway holds in
           memory, so it takes milliseconds even for queries made of common words. The copy is built
           in the background after the gateway starts and rebuilt as your corpus changes; until it is
@@ -248,7 +256,7 @@
           </figcaption>
         </figure>
         <p>
-          Filters restrict both lanes before anything is ranked. The ranking settings, including
+          Filters restrict every lane before anything is ranked. The ranking settings, including
           <code>search.boosts.typeBoosts</code>, are described under
           <a href="/docs/operating#configuration">Operating → Configuration</a>.
         </p>
@@ -294,7 +302,33 @@
           Each result leads with a short document ID you can paste straight into
           <code>omnesis show</code>, and ends with a link to the original when the source provides
           one. The portal's search page and the apps run the same pipeline against the same index,
-          with the same query language.
+          with the same query language. The portal's search address carries its query
+          (<code>/portal/search?q=lease%20renewal</code>), so a search can be bookmarked or linked.
+        </p>
+        <h3 id="time-in-queries">Time in queries</h3>
+        <p>
+          Words that name a time, such as <code>last week</code>, <code>tomorrow</code>,
+          <code>in March</code>, <code>Q3 2025</code> or <code>15 juin</code>, are read as a
+          calendar window. A third lane then ranks only the documents inside that window by the rest
+          of the query, within the same filters, and its list is fused with the keyword and semantic
+          lists. A document is inside the window when it was sent or written there, or when it is
+          about a day there: a calendar event, a booking, or a date mentioned in its text. So
+          <code>dentist next month</code> finds the confirmation that arrived weeks ago, and
+          <code>invoice from last March</code> prefers that March's invoice over older ones that use
+          the same words.
+        </p>
+        <p>
+          The window is a preference, not a filter: a strong match from another time still appears.
+          To restrict results to a range, use <code>after:</code> and <code>before:</code> (see
+          <a href="#query-syntax">Query syntax</a>). A day or month written without a year reads as
+          its nearer occurrence, or as both the last and the next one when they are close or when
+          the period is a month or longer; words like <code>last</code>, <code>ago</code> and
+          <code>paid</code>, or <code>next</code>, <code>upcoming</code> and <code>tomorrow</code>,
+          settle the direction. English, French and Spanish phrases are read, in the time zone the
+          client sends (the portal, the CLI and the agents send theirs) or else the gateway's. The
+          lane is on by default; set <code>search.temporal.enabled</code> to <code>false</code> in
+          <code>omnesis.json</code> and restart the gateway to turn it off.
+          <code>search.temporal.weight</code> sets its weight in the fusion.
         </p>
 
         <p>
@@ -490,7 +524,7 @@
           rows in an analytics database (DuckDB) alongside the document index.
           <code>omnesis analytics</code> lists every table with its description and row count (add
           <code>--json</code> for column schemas); <code>omnesis sql</code> queries them directly,
-          as does the <strong>Debug → SQL</strong> tab in the portal.
+          as does the <strong>Debug → Data tools → SQL</strong> tab in the portal.
         </p>
         <div class="term">
           <div class="term-bar"><span></span><span></span><span></span></div>
@@ -529,6 +563,11 @@ Messages  12.9</pre
           can inspect your data but never modify it or reach outside the database. Which tables
           exist depends on which
           <a href="/docs/sources">sources</a> you have connected.
+        </p>
+        <p>
+          A timestamp stored with its zone comes back as a UTC instant
+          (<code>2026-10-18T17:28:00.000Z</code>), a date as <code>YYYY-MM-DD</code>, and a
+          timestamp stored without a zone as the wall-clock time the source recorded.
         </p>
 
         <h2 id="from-your-own-tools">From your own tools</h2>

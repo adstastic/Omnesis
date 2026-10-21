@@ -25,17 +25,26 @@ export const DEFAULT_MAX_BACKPRESSURE_WAITS = 10;
 export const DEFAULT_WS_HEARTBEAT_TIMEOUT_MS = 90_000;
 
 /**
- * Maximum wall time for one optional OCR request. OCR enrichment must not hold
- * a source cursor behind a pathological attachment until an upstream proxy's
- * much longer request deadline expires.
+ * How long past the OCR deadline the client keeps waiting. The gateway stops
+ * the backend at the deadline and answers 504; the grace lets that answer
+ * arrive instead of the client cutting the request off first.
  */
-export const DEFAULT_OCR_REQUEST_TIMEOUT_MS = 30_000;
+export const OCR_RESPONSE_GRACE_MS = 15_000;
 
 /**
- * Pause new OCR requests once they keep reaching the client deadline. The
- * gateway does not yet propagate client disconnects to already-started OCR
- * work, so this rate-limits orphaned work from a page containing many bad
- * attachments while letting primary source documents continue to drain.
+ * How long past the gateway's longest transcription (`MAX_TRANSCRIPTION_MS`)
+ * the client keeps waiting for a transcript. The gateway transcribes one
+ * recording at a time and its deadline starts when a recording's turn comes,
+ * so this margin absorbs a short wait behind others. A request still
+ * unanswered after it is given up and retried on a later sync; the gateway
+ * then skips or stops the work it was doing for it.
+ */
+export const TRANSCRIBE_RESPONSE_GRACE_MS = 5 * 60_000;
+
+/**
+ * Pause new OCR requests once they keep reaching the deadline, so a page full
+ * of attachments the backend cannot read in time stops occupying it while
+ * primary source documents continue to drain.
  */
 export const DEFAULT_OCR_TIMEOUT_COOLDOWN_MS = 5 * 60_000;
 

@@ -210,6 +210,8 @@ export async function createWrapsRealWhatsApp(opts: CreateOptions): Promise<Sour
     extractAttachment,
     downloadMedia: provider.getMediaDownloader(),
     onConnectionError: (handler) => provider.onConnectionError(handler),
+    offConnectionError: (handler) => provider.offConnectionError(handler),
+    connectionFailure: () => provider.connectionFailure(),
   });
 
   let backfillPushed = false;
@@ -239,7 +241,7 @@ export async function createWrapsRealWhatsApp(opts: CreateOptions): Promise<Sour
   controllers.set(String(sourceId), controller);
 
   return {
-    sync: (cursor) => source.sync(cursor),
+    sync: (cursor, opts) => source.sync(cursor, opts),
     onPushEvent: (cb: () => void) => source.onPushEvent(cb),
     onSourceError: (cb: (error: string) => void) => source.onSourceError(cb),
     onResync: () => source.onResync(),

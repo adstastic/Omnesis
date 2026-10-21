@@ -30,7 +30,11 @@ export {
   type AgentTurnOutcome,
 } from "./turn-outcome.js";
 
-export { serializeToolResultForModel } from "./tool-result-text.js";
+export {
+  serializeToolResultForModel,
+  type ToolResultSerializationOptions,
+} from "./tool-result-text.js";
+export { annotateLocalTimes, instantSafeEnd, withoutCutInstantAtEnd } from "./local-times.js";
 
 export {
   DEFAULT_MAX_TOOL_ITERATIONS,
@@ -50,6 +54,8 @@ export {
   type ToolCaller,
   type ToolContext,
   UNATTRIBUTED_CALLER,
+  summarizeToolArgs,
+  summaryExcerpt,
   wrapEvent,
 } from "./backend.js";
 
@@ -102,7 +108,6 @@ export {
   convertToolsToCodexDynamicTools,
   ensureCodexHome,
   parseCodexCliVersion,
-  renderCodexUserInput,
   resolveCodexRuntimeCommand,
   type CodexAppServerBackendOptions,
   type CodexAppServerRuntimeOptions,
@@ -126,12 +131,21 @@ export {
   type CodexRuntimePoolOptions,
 } from "./codex-runtime-pool.js";
 
-export { zodToJsonSchema } from "./zod-to-json-schema.js";
+export {
+  ClaudeCodeBackend,
+  ClaudeCodeRuntime,
+  type ClaudeCodeModelInfo,
+  type ClaudeCodeTurnOptions,
+  type ClaudeCodeTurnRunner,
+} from "./claude-code-backend.js";
+
+export { toolInputJsonSchema, zodToJsonSchema } from "./zod-to-json-schema.js";
 
 export {
   CORPUS_CONTENT_IS_DATA,
   SUBJECT_ATTRIBUTION_REQUIRES_EVIDENCE,
   renderAnalyticsCatalog,
+  renderRetrievalContext,
   renderAnalyticsRetrievalGuidance,
   renderCognitionRetrievalGuidance,
   renderReadOnlyRetrievalPlaybook,
@@ -294,6 +308,10 @@ export type {
   SubagentJoinResult,
   LoopReadPort,
   LoopListPortResult,
+  LoopListObservation,
+  LoopListReadIdentity,
+  LoopListValidationFailure,
+  LoopListReadOptions,
   LoopSearchPortInput,
   LoopSearchPortResult,
   TemporalReadPort,
@@ -302,3 +320,4 @@ export type {
   EntityContextSeed,
   EntityContextSeedKind,
 } from "./tools/types.js";
+export { CitationReads } from "./tools/citation-reads.js";

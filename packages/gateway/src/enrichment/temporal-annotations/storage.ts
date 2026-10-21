@@ -260,6 +260,26 @@ export function expandCanonical(
   return null;
 }
 
+/**
+ * A canonical with every ISO part spelt as a UTC instant.
+ *
+ * A writer may give an instant without an offset (`2026-10-18T19:26`), which
+ * {@link expandCanonical} reads in the gateway host's zone. Shown back as
+ * written, that clock names no zone, and a reader takes it for their own local
+ * time. Re-spelling it as the instant it was stored as (`…T18:26:00.000Z`)
+ * keeps the moment unambiguous. Calendar parts (`YYYY[-MM[-DD]]`) stay as
+ * written: a day names no moment.
+ */
+export function canonicalWithUtcInstants(canonical: string): string {
+  return canonical
+    .split(" .. ")
+    .map((part) => {
+      const expanded = expandCanonical(part);
+      return expanded?.precision === "instant" ? new Date(expanded.startMs).toISOString() : part;
+    })
+    .join(" .. ");
+}
+
 /** One grounding atom as callers supply it (create / evidence replace). */
 export interface TemporalAnnotationEvidenceInput {
   docId: string;
@@ -982,10 +1002,11 @@ export function listTemporalAnnotationsAwaitingRefile(
   db: Db,
   docId: string,
   limit: number,
+  excludePresentedRunId: string | null = null,
 ): InvalidatedTemporalAnnotation[] {
   return db
     .prepare<
-      [string, string, number],
+      [string, string, string | null, string | null, number],
       {
         id: string;
         sentence: string;
@@ -1009,10 +1030,11 @@ export function listTemporalAnnotationsAwaitingRefile(
           AND (e.refile_presented_run IS NULL
                OR EXISTS (SELECT 1 FROM cognition_runs r
                            WHERE r.id = e.refile_presented_run AND r.status <> 'completed'))
+          AND (? IS NULL OR e.refile_presented_run IS NULL OR e.refile_presented_run <> ?)
         ORDER BY e.invalidated_at DESC, e.id DESC
         LIMIT ?`,
     )
-    .all(docId, docId, Math.max(1, limit))
+    .all(docId, docId, excludePresentedRunId, excludePresentedRunId, Math.max(1, limit))
     .map((r) => ({
       id: r.id,
       sentence: r.sentence,

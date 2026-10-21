@@ -38,6 +38,8 @@ import { hydrateChunkText } from "./hydrate-chunks.js";
 import { applyBoostPass } from "./stages/boost-stage.js";
 import { diversityIsEnabled, diversityReorder } from "./stages/diversity-stage.js";
 import { hnswSearchCandidates } from "./vector-hnsw.js";
+import { boundedExactVectorCandidates } from "./vector-bounded-exact.js";
+import { temporalLaneCandidates, type TemporalLaneRequest } from "./temporal-lane.js";
 import type { VectorReadSource } from "../indexer/usearch-index.js";
 import type { ResolvedDiversityConfig, ResolvedSearchSettings } from "./search-config.js";
 import type {
@@ -112,6 +114,8 @@ export interface CandidateGenRequest {
   sourcePriors: ResolvedSourcePriorsConfig;
   diversity: ResolvedDiversityConfig;
   commonTokenThreshold: number;
+  /** The temporal lane, when the query named a time and the lane is enabled (hybrid only). */
+  temporal?: TemporalLaneRequest;
 }
 
 export interface CandidateGenResult {
@@ -134,6 +138,8 @@ export interface CandidateGenResult {
     bm25Candidates?: number;
     vectorMs?: number;
     vectorCandidates?: number;
+    temporalMs?: number;
+    temporalCandidates?: number;
   };
   /** The vector lane degraded to BM25 via a dim/model mismatch. */
   vectorDegraded: boolean;
@@ -205,8 +211,22 @@ export function runCandidateGen(
     const vectorCandidates = vectorRun.candidates;
     if (vectorRun.degraded) vectorDegraded = true;
 
+    // The temporal lane ranks by meaning only where the vector lane could:
+    // its query vector is compared with the same generation of stored
+    // embeddings, which mid-swap may belong to another model.
+    const vectorRan = stageReports.vector?.status === "ran" && !vectorRun.degraded;
+    const temporalCandidates = req.temporal
+      ? runTemporal(
+          res,
+          req,
+          vectorRan ? req.temporal : { ...req.temporal, vector: null },
+          stageReports,
+          timing,
+        )
+      : [];
+
     // Fusion → Boost → Diversity, exactly as the post-fusion stages ran.
-    results = fuse(req, bm25Candidates, vectorCandidates, stageReports);
+    results = fuse(req, bm25Candidates, vectorCandidates, temporalCandidates, stageReports);
 
     // Boost always runs (its stage's `isEnabled` was unconditionally true): even
     // without settings boosts it applies source priors + the mirror down-weight and
@@ -272,6 +292,7 @@ function runVector(
   const { hnswOverFetch, alwaysOverFetch } = req.vectorConfig;
   const sqlStart = Date.now();
   let candidates: SearchCandidate[];
+  let engine = "hnsw";
   try {
     // Follow the active generation BEFORE comparing model identities. If the
     // pointer just flipped, checking the old handle first would report a model
@@ -295,18 +316,30 @@ function runVector(
       return { candidates: [], degraded: true };
     }
 
-    candidates = hnswSearchCandidates(
-      res.usearchRead,
+    const exact = boundedExactVectorCandidates(
       res.indexDb,
       req.queryVector,
       req.filters,
       req.candidateLimit,
-      {
-        documentIds: req.allowedDocumentIds,
-        hnswOverFetch,
-        alwaysOverFetch,
-      },
+      req.candidateLimit * hnswOverFetch,
+      req.allowedDocumentIds,
+      req.queryModelId ?? activeModelId,
     );
+    if (exact !== null) engine = "exact";
+    candidates =
+      exact ??
+      hnswSearchCandidates(
+        res.usearchRead,
+        res.indexDb,
+        req.queryVector,
+        req.filters,
+        req.candidateLimit,
+        {
+          documentIds: req.allowedDocumentIds,
+          hnswOverFetch,
+          alwaysOverFetch,
+        },
+      );
   } catch (err) {
     // A refresh failure or query/index dimension mismatch during an embedder
     // swap degrades to BM25 rather than failing the request. The registry does
@@ -314,7 +347,7 @@ function runVector(
     const reason = SKIP_REASON_REINDEXING;
     stageReports.vector = { status: "skipped", reason };
     log.warn(
-      `Vector: skipped (HNSW refresh/search failed, likely mid-embedder-swap): ${
+      `Vector: skipped (Vector index refresh/search failed, likely mid-embedder-swap): ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
@@ -335,13 +368,47 @@ function runVector(
     effectiveK: req.candidateLimit * hnswOverFetch,
     embedMs: req.embedMs,
     sqlMs,
-    engine: "hnsw",
+    engine,
   };
   log.info(
     `Vector: ${candidates.length} candidates in ${durationMs}ms ` +
-      `(embed=${req.embedMs}ms sql=${sqlMs}ms engine=hnsw)`,
+      `(embed=${req.embedMs}ms sql=${sqlMs}ms engine=${engine})`,
   );
   return { candidates, degraded: false };
+}
+
+/** The temporal lane: candidates from the query's time windows, with its stage report. */
+function runTemporal(
+  res: CandidateGenResources,
+  req: CandidateGenRequest,
+  lane: TemporalLaneRequest,
+  stageReports: StageReports,
+  timing: CandidateGenResult["timing"],
+): SearchCandidate[] {
+  const { candidates, report } = temporalLaneCandidates(
+    res.indexDb,
+    res.usearchRead,
+    lane,
+    req.filters,
+    req.allowedDocumentIds,
+    req.candidateLimit,
+    { commonTokenThreshold: req.commonTokenThreshold, ranker: res.lexicalRanker },
+  );
+  timing.temporalMs = report.durationMs;
+  timing.temporalCandidates = candidates.length;
+  stageReports.temporal = {
+    status: "ran",
+    durationMs: report.durationMs,
+    candidates: candidates.length,
+    eventDocuments: report.eventDocuments,
+    ranking: report.timeOrdered ? "time" : "relevance",
+  };
+  log.info(
+    `Temporal: ${candidates.length} candidates in ${report.durationMs}ms ` +
+      `(eventDocs=${report.eventDocuments} bm25=${report.bm25Candidates} ` +
+      `vector=${report.vectorCandidates} timeOrdered=${report.timeOrdered})`,
+  );
+  return candidates;
 }
 
 /**
@@ -353,6 +420,7 @@ function fuse(
   req: CandidateGenRequest,
   bm25Candidates: SearchCandidate[],
   vectorCandidates: SearchCandidate[],
+  temporalCandidates: SearchCandidate[],
   stageReports: StageReports,
 ): SearchResultItem[] {
   const poolLimit = req.candidateLimit;
@@ -363,14 +431,20 @@ function fuse(
   // mean anything against RRF-shaped scores. Falling back to raw BM25 scores
   // here would silently neutralise both. Only the reported method reflects
   // whether the vector lane actually ran.
-  const fused = rrfFuse(bm25Candidates, vectorCandidates, {
-    k: req.settings.params.rrfK,
-    bm25Weight: req.settings.params.bm25Weight,
-    vectorWeight: req.settings.params.vectorWeight,
-    limit: poolLimit,
-    topRankBonus: req.settings.params.topRankBonus,
-    nearTopRankBonus: req.settings.params.nearTopRankBonus,
-  });
+  const fused = rrfFuse(
+    bm25Candidates,
+    vectorCandidates,
+    {
+      k: req.settings.params.rrfK,
+      bm25Weight: req.settings.params.bm25Weight,
+      vectorWeight: req.settings.params.vectorWeight,
+      limit: poolLimit,
+      topRankBonus: req.settings.params.topRankBonus,
+      nearTopRankBonus: req.settings.params.nearTopRankBonus,
+      temporalWeight: req.temporal?.weight,
+    },
+    temporalCandidates,
+  );
   stageReports.fusion = req.embedderPresent
     ? {
         status: "ran",
@@ -378,8 +452,14 @@ function fuse(
         rrfK: req.settings.params.rrfK,
         bm25Weight: req.settings.params.bm25Weight,
         vectorWeight: req.settings.params.vectorWeight,
+        ...(req.temporal ? { temporalWeight: req.temporal.weight } : {}),
         resultCount: fused.length,
       }
-    : { status: "ran", method: "bm25-only", resultCount: fused.length };
+    : {
+        status: "ran",
+        method: "bm25-only",
+        ...(req.temporal ? { temporalWeight: req.temporal.weight } : {}),
+        resultCount: fused.length,
+      };
   return fused;
 }

@@ -187,9 +187,11 @@ export default defineSource<WhatsAppSyncCursor>({
       attachmentConfig,
       extractAttachment: host?.extractAttachment,
       transcribeAudio: host?.transcribeAudio,
+      isTranscriptionVocabularyEnabled: host?.isTranscriptionVocabularyEnabled,
       downloadMedia: provider.getMediaDownloader(),
       onConnectionError: (handler) => provider.onConnectionError(handler),
       offConnectionError: (handler) => provider.offConnectionError(handler),
+      connectionFailure: () => provider.connectionFailure(),
     });
 
     return {
@@ -204,7 +206,7 @@ export default defineSource<WhatsAppSyncCursor>({
         bgColor: "#12251C",
         url: whatsappIconUrl,
       },
-      sync: (cursor) => source.sync(cursor) as Promise<SyncResult<WhatsAppSyncCursor>>,
+      sync: (cursor, opts) => source.sync(cursor, opts) as Promise<SyncResult<WhatsAppSyncCursor>>,
       credentialState: () => provider.credentialState(),
       probeLocalStores: async () => [
         inspectMessageStore(join(host?.configDir ?? DEFAULT_CONFIG_DIR, "whatsapp", accountId)),

@@ -3622,7 +3622,7 @@ describe("device management endpoints", () => {
     return ((await res.json()) as { pairingCode: string }).pairingCode;
   }
 
-  test("/admin/devices/pair-qr emits V3 with fingerprint when TLS is configured", async () => {
+  test("/admin/devices/pair-qr pins the leaf (V3) for an IP address when no trust mode is named", async () => {
     const pairingCode = await mintPairingCode();
     const fp = "a".repeat(64);
     const customApp = createServer(db, undefined, { tlsFingerprintSha256: fp });
@@ -3648,7 +3648,7 @@ describe("device management endpoints", () => {
     });
   });
 
-  test("/admin/devices/pair-qr falls back to V2 when TLS is unconfigured", async () => {
+  test("/admin/devices/pair-qr falls back to V2 for an IP address when TLS is unconfigured", async () => {
     const pairingCode = await mintPairingCode();
     const res = await req("/admin/devices/pair-qr", {
       method: "POST",
@@ -3664,6 +3664,30 @@ describe("device management endpoints", () => {
       v: 2,
       gatewayUrl: "https://10.0.0.5:7600",
       pairingCode,
+    });
+  });
+
+  test("/admin/devices/pair-qr gives an allowlisted origin system trust when no trust mode is named", async () => {
+    const pairingCode = await mintPairingCode();
+    const customApp = createServer(db, undefined, {
+      tlsFingerprintSha256: "c".repeat(64),
+      systemTrustPairingOrigins: ["https://public-gateway.example.com"],
+    });
+    const res = await customApp.request("/admin/devices/pair-qr", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TEST_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ pairingCode, gatewayUrl: "https://public-gateway.example.com" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { qrPayload: string };
+    expect(JSON.parse(body.qrPayload)).toEqual({
+      v: 4,
+      gatewayUrl: "https://public-gateway.example.com",
+      pairingCode,
+      tls: { mode: "system" },
     });
   });
 
@@ -8756,6 +8780,27 @@ describe("POST /sql", () => {
 });
 
 describe("GET /status", () => {
+  test("enables demo presentation only for OMNESIS_DEMO=1 and retains test identity", async () => {
+    const names = ["OMNESIS_DEMO", "OMNESIS_TEST_INSTANCE"] as const;
+    const saved = names.map((name) => process.env[name]);
+    try {
+      process.env.OMNESIS_TEST_INSTANCE = "1";
+      for (const value of [undefined, "0", "true", "1"]) {
+        if (value === undefined) delete process.env.OMNESIS_DEMO;
+        else process.env.OMNESIS_DEMO = value;
+        const response = await req("/status");
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ demo: value === "1", testInstance: {} });
+      }
+      expect((await app.request("/status")).status).toBe(401);
+    } finally {
+      names.forEach((name, index) => {
+        if (saved[index] === undefined) delete process.env[name];
+        else process.env[name] = saved[index];
+      });
+    }
+  });
+
   test("serves test labels only on authenticated status, never public health", async () => {
     const names = [
       "OMNESIS_TEST_INSTANCE",
@@ -9035,10 +9080,10 @@ describe("GET /status", () => {
       // break what older clients already file.
       for (const body of [
         {
-          targetType: "brief",
-          targetId: "b-1",
+          targetType: "document",
+          targetId: "doc-1",
           note: "Stale numbers.",
-          context: { label: "Brief b-1" },
+          context: { label: "Document doc-1" },
           client: "ios",
         },
         { targetType: "route", note: "General note." },

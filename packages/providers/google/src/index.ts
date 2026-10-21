@@ -102,7 +102,7 @@ export default defineProvider<GoogleContext>({
   },
 
   async disposeContext(ctx) {
-    await ctx.provider.disconnect();
+    ctx.provider.dispose();
   },
 
   sources: [
@@ -191,6 +191,7 @@ export default defineProvider<GoogleContext>({
         const source = new GmailSource(ctx.auth, accountId, dataCutoff, {
           attachmentConfig,
           extractAttachment: host?.extractAttachment,
+          isTranscriptionVocabularyEnabled: host?.isTranscriptionVocabularyEnabled,
         });
         return { sync: (cursor, opts) => source.sync(cursor, opts) };
       },

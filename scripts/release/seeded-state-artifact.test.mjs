@@ -16,6 +16,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { runSchemaSetup } from "../../packages/gateway/src/data/schema.js";
+import { createDatabase } from "../../packages/gateway/src/db.js";
 import { createTranscriptionVocabularyTables } from "../../packages/gateway/src/transcribe/vocabulary/storage.js";
 import { createIndexDatabase } from "../../packages/gateway/src/indexer/db.js";
 import {
@@ -121,12 +122,24 @@ describe("seeded-state artifacts", () => {
       INSERT INTO transcription_vocabulary_document_terms (
         document_id, scope_kind, scope_key, term
       ) VALUES ('doc-1', 'global', '', 'quorvex');
+      INSERT INTO transcription_vocabulary_profiles VALUES ('global','',1);
+      INSERT INTO transcription_vocabulary_document_profiles VALUES ('doc-1','global','');
+      INSERT INTO transcription_vocabulary_spellings VALUES ('global','','quorvex','Quorvex',1,3);
+      UPDATE transcription_vocabulary_terms SET recent_mass=1,evidence_count=1,
+        ordinary_document_count=1,spelling_count=1;
+      UPDATE transcription_vocabulary_document_terms SET observed_text='Quorvex',
+        observed_at='2026-01-01T00:00:00.000Z',observed_automated=0;
+      UPDATE transcription_vocabulary_refresh_state SET cursor='doc-1',done=0;
     `);
     source.close();
     const tables = [
       "transcription_vocabulary_terms",
       "transcription_vocabulary_document_terms",
       "transcription_vocabulary_state",
+      "transcription_vocabulary_refresh_state",
+      "transcription_vocabulary_profiles",
+      "transcription_vocabulary_document_profiles",
+      "transcription_vocabulary_spellings",
     ];
     createSeededStateArtifact(
       {
@@ -147,6 +160,24 @@ describe("seeded-state artifacts", () => {
     expect(
       output
         .prepare(
+          "SELECT recent_mass,evidence_count,ordinary_document_count,spelling_count FROM transcription_vocabulary_terms",
+        )
+        .get(),
+    ).toEqual({ recent_mass: 1, evidence_count: 1, ordinary_document_count: 1, spelling_count: 1 });
+    expect(
+      output
+        .prepare(
+          "SELECT observed_text,observed_at,observed_automated FROM transcription_vocabulary_document_terms",
+        )
+        .get(),
+    ).toEqual({
+      observed_text: "Quorvex",
+      observed_at: "2026-01-01T00:00:00.000Z",
+      observed_automated: 0,
+    });
+    expect(
+      output
+        .prepare(
           "SELECT wr FROM pragma_table_list WHERE name='transcription_vocabulary_document_terms'",
         )
         .get(),
@@ -154,14 +185,28 @@ describe("seeded-state artifacts", () => {
     expect(
       output.prepare("SELECT algorithm_version, phase FROM transcription_vocabulary_state").get(),
     ).toEqual({ algorithm_version: 1, phase: "ready" });
+    expect(
+      output.prepare("SELECT cursor,done FROM transcription_vocabulary_refresh_state").get(),
+    ).toEqual({ cursor: "doc-1", done: 0 });
+    expect(
+      output.prepare("SELECT document_count FROM transcription_vocabulary_profiles").get(),
+    ).toEqual({ document_count: 1 });
+    expect(
+      output.prepare("SELECT document_id FROM transcription_vocabulary_document_profiles").get(),
+    ).toEqual({ document_id: "doc-1" });
+    expect(
+      output
+        .prepare("SELECT text,document_count,benefit FROM transcription_vocabulary_spellings")
+        .get(),
+    ).toEqual({ text: "Quorvex", document_count: 1, benefit: 3 });
     output.close();
   });
 
   it("classifies every table in the current gateway and index schemas", () => {
     const root = mkdtempSync(join(tmpdir(), "omnesis-seeded-schema-"));
     temporaryDirectories.push(root);
-    const gateway = new Database(join(root, "omnesis.db"));
-    runSchemaSetup(gateway);
+    // The gateway's own opener: tables installed after migrations count too.
+    const gateway = createDatabase(join(root, "omnesis.db"));
     const index = createIndexDatabase(join(root, "index.db"), { skipWal: true });
 
     for (const database of [gateway, index]) {
@@ -171,17 +216,78 @@ describe("seeded-state artifacts", () => {
         )
         .pluck()
         .all();
-      expect(() => {
-        for (const table of tables) {
-          const columns = database
-            .prepare("SELECT name FROM pragma_table_info(?)")
-            .pluck()
-            .all(table);
+      const unclassified = tables.filter((table) => {
+        const columns = database
+          .prepare("SELECT name FROM pragma_table_info(?)")
+          .pluck()
+          .all(table);
+        try {
           seededStateTableSpec(table, columns);
+          return false;
+        } catch {
+          return true;
         }
-      }).not.toThrow();
+      });
+      expect(unclassified).toEqual([]);
       database.close();
     }
+  });
+
+  it("preserves pending synthesis privacy fences but clears guards and decision receipts", () => {
+    const paths = fixture();
+    rmSync(paths.sourcePath);
+    const source = new Database(paths.sourcePath);
+    runSchemaSetup(source);
+    source.exec(`
+      INSERT INTO knowledge_source_revisions(document_id,content_hash,deleted,updated_at) VALUES ('deleted-source', 'old-hash', 1, 100);
+      INSERT INTO knowledge_node_tombstones VALUES ('deleted-wiki', 100);
+      INSERT INTO knowledge_cascade_jobs VALUES (1, 'privacy', 'source', 'deleted-source', 'old-hash', 100);
+      INSERT INTO knowledge_cascade_frontier VALUES (1, 'source', 'deleted-source', '', 0);
+      INSERT INTO knowledge_projection_cleanup VALUES ('mirror-document', 'deleted-wiki', 100);
+      INSERT INTO knowledge_owner_write_guard VALUES ('loop', 'loop-fixture');
+      INSERT INTO knowledge_owner_withdraw_guard VALUES ('annotation-fixture');
+      INSERT INTO knowledge_owner_retire_guard VALUES ('loop-fixture');
+      INSERT INTO knowledge_outcome_assessments VALUES ('loop-fixture','policy','fingerprint','decision',NULL,'pass',0,100);
+      INSERT INTO knowledge_outcome_assessment_sources VALUES ('loop-fixture','fingerprint','source-fixture');
+    `);
+    const schemaVersion = source.pragma("user_version", { simple: true });
+    source.close();
+    const retained = [
+      "knowledge_source_revisions",
+      "knowledge_node_tombstones",
+      "knowledge_cascade_jobs",
+      "knowledge_cascade_frontier",
+      "knowledge_projection_cleanup",
+    ];
+    const cleared = [
+      "knowledge_outcome_assessments",
+      "knowledge_outcome_assessment_sources",
+      "knowledge_owner_write_guard",
+      "knowledge_owner_withdraw_guard",
+      "knowledge_owner_retire_guard",
+    ];
+    createSeededStateArtifact(
+      {
+        ...spec(paths, [...retained, ...cleared]),
+        schemaVersion,
+        expected: {
+          rowCounts: {
+            "omnesis.db": Object.fromEntries([
+              ...retained.map((table) => [table, 1]),
+              ...cleared.map((table) => [table, 0]),
+            ]),
+          },
+        },
+      },
+      paths.artifact,
+    );
+    const output = new Database(join(paths.artifact, "omnesis.db"), { readonly: true });
+    for (const table of retained)
+      expect(output.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get()).toBe(1);
+    for (const table of cleared)
+      expect(output.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get()).toBe(0);
+    expect(output.prepare("SELECT deleted FROM knowledge_source_revisions").pluck().get()).toBe(1);
+    output.close();
   });
 
   it("retains operational schemas but resets reconciliation and cleanup work", () => {
@@ -432,6 +538,9 @@ describe("seeded-state artifacts", () => {
       "oauth_execution_bindings",
       "oauth_refresh_tokens",
       "principal_credentials",
+      "knowledge_decision_inputs",
+      "knowledge_decision_input_subjects",
+      "knowledge_decision_privacy",
     ]) {
       expect(seededStateTableSpec(table, ["secret"])).toBeNull();
     }

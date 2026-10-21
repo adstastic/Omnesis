@@ -64,8 +64,6 @@
         <div class="nav-right">
           <ul class="nav-links">
             <li><a href="/">Context Layer</a></li>
-            <li><a href="/brain">Omnesis Brain</a></li>
-            <li><a href="/vision">Vision</a></li>
             <li><a href="/docs/" aria-current="page">Docs</a></li>
             <li><a href="/blog/">Blog</a></li>
           </ul>
@@ -187,6 +185,13 @@
           (repeatable) to add environment variables to the unit. Re-running
           <code>install</code> rewrites the unit from the flags you pass, so pass the same ones the
           service was installed with, then <code>omnesis service restart</code> it.
+        </p>
+        <p>
+          For demonstrations, set <code>OMNESIS_DEMO=1</code> on the gateway and restart it. The
+          portal hides the test-gateway label, release-update card, and source-page cards offering
+          mobile apps, the browser extension, and external agents. This changes only presentation;
+          sources, update checks, and feature gates continue to work normally. Unset the variable or
+          set it to <code>0</code> to restore the cards.
         </p>
         <div class="term">
           <div class="term-bar"><span></span><span></span><span></span></div>
@@ -310,10 +315,11 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
           skips them).
         </p>
         <p>
-          The same report is in the portal under <strong>Debug → Doctor</strong>. A collector's own
-          report covers its configuration, source access, disk, process, keyring and service; run it
-          from <strong>Settings → Devices</strong> by expanding the collector and choosing
-          <strong>Run</strong> under <strong>Health</strong>, or <strong>Run health checks</strong>
+          The same report is in the portal under <strong>Debug → System → Health</strong>. A
+          collector's own report covers its configuration, source access, disk, process, keyring and
+          service; run it from <strong>Settings → Devices</strong> by expanding the collector and
+          choosing <strong>Run</strong> under <strong>Health</strong>, or
+          <strong>Run health checks</strong>
           for every collector at once.
         </p>
         <p>
@@ -337,15 +343,15 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
 
         <h3 id="calendar">Reading the calendar</h3>
         <p>
-          <strong>Debug → Calendar</strong> combines structured dates supplied by sources (<strong
-            >Source record</strong
-          >), interpretations recorded by the agent (<strong>Agent interpretation</strong>), and
-          date expressions found in document text (<strong>Date mention</strong>). Source records
-          and agent interpretations form the agenda under Timed, All day &amp; due, and Activities
-          &amp; visits, with up to four entries per row within each day’s category. Narrower screens
-          show fewer columns. Date mentions are grouped by document in a collapsed section, with
-          possible deadline mentions counted separately. A date mention does not establish that an
-          event happened or that an obligation belongs to you.
+          <strong>Debug → Knowledge → Timeline</strong> combines structured dates supplied by
+          sources (<strong>Source record</strong>), interpretations recorded by the agent (<strong
+            >Agent interpretation</strong
+          >), and date expressions found in document text (<strong>Date mention</strong>). Source
+          records and agent interpretations form the agenda under Timed, All day &amp; due, and
+          Activities &amp; visits, with up to four entries per row within each day’s category.
+          Narrower screens show fewer columns. Date mentions are grouped by document in a collapsed
+          section, with possible deadline mentions counted separately. A date mention does not
+          establish that an event happened or that an obligation belongs to you.
         </p>
         <p>
           Filter by origin; this choice is remembered in your browser. <strong>Upcoming</strong>
@@ -443,7 +449,10 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
           weighed against each other. <code>search.boosts.typeBoosts</code> multiplies the score of
           a whole document type (above <code>1</code> promotes it, below demotes it).
           <code>search.defaultFilters</code> adds filters to every query; list filters combine with
-          the query's own, and a date range in the query wins. The defaults suit most corpora.
+          the query's own, and a date range in the query wins. <code>search.temporal</code> controls
+          the lane that reads time phrases in a query (see
+          <a href="/docs/search#time-in-queries">Search → Time in queries</a>). The defaults suit
+          most corpora.
         </p>
         <p>
           <code>dataRetention.maxAge</code> limits how old ingested source data may be;
@@ -506,6 +515,17 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
                 <td>
                   Powers <a href="/docs/agent">the agent</a> in the portal and mobile apps, and the
                   agent that prepares Answer results for external agents.
+                </td>
+              </tr>
+              <tr>
+                <td><code>background-agent</code></td>
+                <td>
+                  Reads each note you capture with Tell Omnesis from the portal, the apps or the CLI
+                  and acts on it: adds or updates tasks, remembers stated facts, answers a question
+                  (see
+                  <a href="/docs/apps#voice-and-quick-capture">Voice and quick capture</a>). It
+                  takes the same chat models as <code>agent</code> and is never assigned
+                  automatically. Without it, notes are saved and indexed but not acted on.
                 </td>
               </tr>
               <tr>
@@ -573,17 +593,32 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
             <code>agent</code>, <code>privacy-reviewer</code> and image-capable
             <code>ocr</code> roles from one login; it has no embedding or transcription models.
           </li>
+          <li>
+            <strong>Claude Code</strong>, assigned as <code>claude-code/&lt;model&gt;</code>, which
+            runs on a Claude subscription through the <code>claude</code> command installed and
+            signed in on the gateway host. Omnesis never signs it in: run
+            <code>claude auth login</code> on that host, then refresh the backend under
+            <strong>Settings → Models → Backends</strong> (<strong
+              >Add backend → Claude Code → Check again</strong
+            >
+            before it is listed), or with <code>omnesis claude-code refresh</code>.
+            <code>omnesis claude-code status</code> shows the installation, sign-in state and the
+            models the CLI offers. Claude Code serves the <code>agent</code>,
+            <code>privacy-reviewer</code> and image-capable <code>ocr</code> roles from one login;
+            it has no embedding or transcription models. Sign-in and isolation are covered in
+            <a href="/docs/agent#claude-code">The agent → Claude Code</a>.
+          </li>
         </ul>
         <div class="callout warn">
           <p>
-            By default inference stays on this machine: cloud backends, including Anthropic and
-            Codex, and HTTP backends that resolve to remote addresses require your permission. In
-            the portal, turn on <strong>Allow cloud inference</strong> under
+            By default inference stays on this machine: cloud backends, including Anthropic, Codex
+            and Claude Code, and HTTP backends that resolve to remote addresses require your
+            permission. In the portal, turn on <strong>Allow cloud inference</strong> under
             <strong>Settings → Models</strong> and confirm. Choosing a cloud model while this
             setting is off also asks for confirmation before saving the assignment. The permission
             applies to all configured remote inference backends on this gateway. Depending on their
             roles, they receive messages, conversation context, relevant Omnesis data, tool results,
-            document chunks, search queries, or images.
+            document chunks, search queries, images, or recorded audio.
           </p>
         </div>
         <p>
@@ -628,46 +663,116 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
           <code>inference.transcriptionVocabulary.enabled</code> to <code>true</code> in
           <code>omnesis.json</code>. The gateway learns a small vocabulary from indexed documents,
           prioritizing distinctive names and terms from the current conversation and its people
-          across sources. Sent and received text both contribute; structurally marked metadata,
-          Markdown block quotes and fenced code blocks are excluded, and structured OCR layouts
-          contribute their readable text. Learned terms need at least two distinct supporting
-          documents. Repetition within one document does not count as corroboration, although copies
-          stored as separate documents can still count. Configured and contact-curated names for the
-          current people supply separate identity hints. Linking a person to a document does not
-          itself count as an occurrence of their name. Vocabulary builds in bounded background
-          batches; transcription does not wait for a full build. When an extraction update requires
-          a rebuild, the gateway temporarily supplies no hints while it clears the old dictionary,
-          then repopulates it incrementally. Gateway Whisper uses these hints locally. Paired mobile
-          apps with bulk corpus read access can also fetch a small dictionary for on-device speech
-          recognition, independently of the gateway dictation setting. Apps keep hints in memory,
-          refresh due hints in the background on foreground or status activity after 30 minutes, and
-          stop using them after 24 hours without a successful refresh. Recording never waits for a
-          dictionary request. Setting the flag to <code>false</code> stops vocabulary computation
-          and hint lookup; connected apps clear cached hints when they observe the change. Pairing
-          changes also clear the cache. Switching the flag back on resumes the backlog. Vocabulary
-          entries may remain after their source documents are edited or deleted.
+          across sources. Sent and received text both contribute. Recent source-verified words you
+          authored receive an additional relevance weight of 4 by default, configurable with
+          <code>inference.transcriptionVocabulary.authoredWeight</code>; setting it to
+          <code>0</code> removes this bonus. Authored evidence uses original message or capture
+          dates and decays with a 90-day half-life, so editing or reindexing an old document does
+          not make its wording recent. WhatsApp and iMessage supply your own written message text
+          and captions. Marked voice transcripts do not reinforce their own recognition errors.
+          Legacy evidence without a known written origin supplies no authored bonus. Gmail supplies
+          conservative unquoted plain-text prefixes of sent messages whose sender matches the
+          account. Tell Omnesis supplies your own entries, excluding agent captures and retained
+          webpage content. Unsupported or uncertain authorship supplies no bonus. Contextual terms
+          are compared with their prevalence across the corpus, with smoothing to avoid exaggerating
+          evidence from sparse conversations. Automated and bulk-distributed evidence receives a
+          lower weight until ordinary documents independently corroborate the same term,
+          configurable through <code>machineEvidenceWeight</code> (default <code>0.15</code>);
+          <code>contextPriorDocuments</code> controls contextual smoothing strength (default
+          <code>10</code>). Global rarity and contextual lift refine support without crowding out
+          established self-authored vocabulary; <code>authoredRarityWeight</code> defaults to
+          <code>0.5</code> and <code>authoredContextLiftWeight</code> to <code>0.25</code>. These
+          apply only to verified self-authored evidence. Ordinary global, person and conversation
+          evidence retains full rarity and contextual discrimination so broadly repeated terms
+          cannot gain unbounded frequency advantage over relationship vocabulary. Both settings
+          accept values from <code>0</code> (ignore that discriminator) to <code>1</code> (full
+          strength). These settings live under <code>inference.transcriptionVocabulary</code>. These
+          defaults are initial calibration choices; they do not establish improved speech accuracy
+          for every corpus. Existing WhatsApp archives are reprojected in bounded pages without
+          resetting media; historical Gmail and iMessage evidence is not automatically replayed.
+          Historical Tell Omnesis written projections are refreshed at gateway startup when enabled;
+          untouched transcripts are excluded, while later manual edits may contribute. Common
+          calendar words, compounds, structural chat noise and low-confidence near-common spellings
+          receive filtering or reduced weight, with safeguards for names and acronyms. Structurally
+          marked metadata, transcripts, Markdown block quotes and fenced code blocks are excluded,
+          and structured OCR layouts contribute their readable text. Learned terms need at least two
+          distinct supporting documents. Repetition within one document does not count as
+          corroboration, although copies stored as separate documents can still count. Configured
+          and contact-curated names for the current people supply separate identity hints. Linking a
+          person to a document does not itself count as an occurrence of their name. Vocabulary
+          builds in bounded background batches; transcription does not wait for a full build. When
+          an extraction update requires a rebuild, the gateway temporarily supplies no hints while
+          it clears the old dictionary, then repopulates it incrementally. Evidence and spelling
+          refreshes enroll bounded pages without clearing the available dictionary. The gateway's
+          local Whisper model uses these hints, and so does an HTTP transcription backend on the
+          gateway's own machine; a transcription backend on another machine never receives them.
+          Paired mobile apps with bulk corpus read access can also fetch a small dictionary for
+          on-device speech recognition, independently of the gateway dictation setting. Apps keep
+          hints in memory, refresh due hints in the background on foreground or status activity
+          after 30 minutes, and stop using them after 24 hours without a successful refresh.
+          Recording never waits for a dictionary request. Setting the flag to
+          <code>false</code> stops vocabulary computation and hint lookup; connected apps clear
+          cached hints when they observe the change. Pairing changes also clear the cache. Switching
+          the flag back on resumes the backlog. Vocabulary entries may remain after their source
+          documents are edited or deleted.
         </p>
         <p>
           The local engine depends on the role. The <code>embedder</code> runs a GGUF model in the
           gateway through node-llama-cpp, on the GPU through Metal on Apple Silicon. The
           <code>transcriber</code> runs whisper.cpp in a separate process, so a crash in the native
-          code cannot take the gateway down. The <code>ocr</code> role has three local runtimes:
+          code cannot take the gateway down; it uses the GPU through Metal on Apple Silicon and the
+          CPU elsewhere. The <code>ocr</code> role has three local runtimes:
           <code>apple-vision</code> (macOS, with the Swift toolchain installed),
           <code>tesseract</code> (with the <code>tesseract</code> binary installed), and
           <code>gguf</code>, a llama.cpp vision model you supply, run through
           <code>llama-mtmd-cli</code> with its model and projector paths set under
-          <code>inference.ocr.gguf</code>. A collector gives each image 30 seconds of OCR by
-          default; for a backend that needs longer on dense pages, set
-          <code>inference.ocr.requestTimeoutSeconds</code>. When OCR keeps timing out, collectors
-          pause it for a few minutes. The <code>agent</code> role does not run a local GGUF model;
-          to keep it on your machine, point it at a local OpenAI-compatible server such as Ollama,
-          llama-server or vLLM.
+          <code>inference.ocr.gguf</code>. Each image gets 120 seconds of OCR by default; for a
+          backend that needs longer on dense pages, set
+          <code>inference.ocr.requestTimeoutSeconds</code>. The gateway stops the backend at that
+          deadline, and also when the collector that asked stops waiting. When OCR keeps timing out,
+          collectors pause it for a few minutes. The <code>agent</code> role does not run a local
+          GGUF model; to keep it on your machine, point it at a local OpenAI-compatible server such
+          as Ollama, llama-server or vLLM.
         </p>
+        <p>
+          To transcribe on an NVIDIA or other GPU, run an OpenAI-compatible transcription server on
+          it, such as whisper.cpp's <code>whisper-server</code> built with CUDA or Vulkan, or vLLM
+          serving a Whisper model. Add it as a backend and assign the <code>transcriber</code> role
+          to <code>&lt;backend&gt;/&lt;model&gt;</code>. The gateway decodes each recording and
+          sends it to the server's <code>/v1/audio/transcriptions</code> endpoint as a 16 kHz WAV
+          file. A server on another machine needs remote inference enabled. Whichever engine runs
+          it, one recording gets up to 30 minutes, which a long recording on a CPU can need, and the
+          gateway stops the work when the collector that asked stops waiting.
+        </p>
+        <div class="term">
+          <div class="term-bar"><span></span><span></span><span></span></div>
+          <div class="term-body">
+            <p>
+              <span class="t-prompt">❯</span>
+              <span class="t-cmd"
+                >whisper-server -m ggml-large-v3-turbo.bin --inference-path
+                /v1/audio/transcriptions</span
+              >
+            </p>
+            <p>
+              <span class="t-prompt">❯</span>
+              <span class="t-cmd">omnesis backend add whisper-gpu http://127.0.0.1:8080</span>
+            </p>
+            <p class="tight t-ok">✔ Backend whisper-gpu added (http://127.0.0.1:8080)</p>
+            <p>
+              <span class="t-prompt">❯</span>
+              <span class="t-cmd"
+                >omnesis model assign transcriber whisper-gpu/whisper-large-v3-turbo</span
+              >
+            </p>
+            <p class="tight t-ok">✔ Assigned transcriber = whisper-gpu/whisper-large-v3-turbo</p>
+          </div>
+        </div>
         <p>
           <code>omnesis model assign</code> covers every role, so the terminal and the portal's
           <strong>Settings → Models</strong> tab configure the same set. Assigning
-          <code>ocr</code> to a Codex model sends images and rasterised PDF pages to it, which needs
-          remote inference enabled.
+          <code>ocr</code> to a Codex or Claude Code model sends images and rasterised PDF pages to
+          it, which needs remote inference enabled.
         </p>
         <p>
           Changing the <code>embedder</code> re-embeds the corpus in the background while search
@@ -726,7 +831,9 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
           settings it knows how to send to that provider's API. Reasoning settings are offered for
           OpenAI, Google, Mistral, Groq, Cerebras, Together, DeepSeek, NVIDIA, Moonshot AI and
           OpenRouter; which of the three kinds appear depends on the provider and the model. For
-          Codex, the effort levels come from the installed Codex runtime's own model list.
+          Codex, the effort levels come from the installed Codex runtime's own model list. For
+          Claude Code, they come from the installed CLI's catalog and are passed to it as
+          <code>claude --effort</code>.
         </p>
         <p>
           Anthropic, local GGUF and other OpenAI-compatible servers show no reasoning settings, and
@@ -890,16 +997,52 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
         <p>
           When <code>OMNESIS_CODEX_COMMAND</code> points at your own Codex executable, Omnesis
           treats the runtime as externally managed: update it yourself, restart the gateway, then
-          refresh the model list.
+          refresh the model list. If the operating system denies starting the runtime, check execute
+          permissions and directory access for the configured executable.
         </p>
         <p>
-          Codex runs three interactive turns at once by default and two other inference calls, and
-          queues the rest. Tune this with <code>inference.codex.interactivePoolSize</code> and
+          Codex reserves separate capacity for three interactive turns, four background turns, and
+          two inference calls by default, and queues the rest. Tune this with
+          <code>inference.codex.interactivePoolSize</code>,
+          <code>inference.codex.backgroundPoolSize</code> (1–32), and
           <code>inference.codex.inferencePoolSize</code> (or the
-          <code>OMNESIS_CODEX_INTERACTIVE_POOL_SIZE</code> and
+          <code>OMNESIS_CODEX_INTERACTIVE_POOL_SIZE</code>,
+          <code>OMNESIS_CODEX_BACKGROUND_POOL_SIZE</code>, and
           <code>OMNESIS_CODEX_INFERENCE_POOL_SIZE</code> environment variables, which win) and
           restart the gateway. More slots use more memory, and every process shares the same ChatGPT
           allowance.
+        </p>
+
+        <p>
+          A Codex turn that receives no model-stream activity for five minutes is interrupted,
+          releasing its runtime slot. Time spent executing Omnesis tools is excluded. Set
+          <code>inference.codex.turnIdleTimeoutMs</code> (1000–3600000 milliseconds), or
+          <code>OMNESIS_CODEX_TURN_IDLE_TIMEOUT_MS</code> to override it, and restart the gateway.
+          This limits silence rather than the total duration of an active turn.
+        </p>
+
+        <h3 id="claude-code">Claude Code runtime and capacity</h3>
+        <p>
+          Omnesis does not install or update Claude Code. It needs Claude Code 2.1.259 or later and
+          finds the <code>claude</code> command on the gateway's <code>PATH</code> or where the
+          official installers put it: <code>~/.local/bin/claude</code>,
+          <code>~/.claude/local/claude</code>, <code>/opt/homebrew/bin/claude</code>,
+          <code>/usr/local/bin/claude</code> or <code>/usr/bin/claude</code>. Set
+          <code>OMNESIS_CLAUDE_CODE_COMMAND</code> to use a different executable. Update it with
+          Claude Code's own updater, <code>claude update</code>, then refresh the backend;
+          <code>omnesis update</code> does not touch it. Omnesis turns off the CLI's background
+          auto-updater inside its own turns.
+        </p>
+        <p>
+          Every Claude Code turn is its own process, admitted per lane: up to three conversation
+          turns at once, one background turn, and two single-shot calls such as privacy reviews and
+          OCR. The rest queue. A turn started from inside another turn's tool, such as a sub-agent,
+          is admitted on separate capacity for its nesting depth, so it never waits behind its
+          parent. Every process shares the same Claude subscription's usage limits.
+        </p>
+        <p>
+          When a role uses Claude Code, <code>omnesis doctor</code> reports
+          <code>models.claude-code</code>: whether the CLI is installed, supported and signed in.
         </p>
 
         <h2 id="troubleshooting">Troubleshooting</h2>
@@ -1025,9 +1168,15 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
                 <td><a href="/docs/notifications#status">Notification status</a></td>
               </tr>
               <tr>
-                <td>A phone or remote collector stops connecting after a certificate renewal</td>
+                <td>
+                  A phone, agent or remote collector stops connecting after a certificate renewal
+                </td>
                 <td>It pinned the old certificate's fingerprint</td>
-                <td><a href="/docs/security#tls">TLS certificate</a></td>
+                <td>
+                  <a href="/docs/security#pinned-clients"
+                    >Clients that pinned the old certificate</a
+                  >
+                </td>
               </tr>
               <tr>
                 <td>A collector reports <code>Gateway upgrade required</code></td>
@@ -1075,8 +1224,10 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
           <code>omnesis sources debug &lt;id&gt;</code> shows a source's sync position and counts,
           <code>omnesis sources reauth &lt;provider&gt;:&lt;account&gt;</code> signs an account in
           again, and <code>omnesis sources resync &lt;id&gt;</code> rebuilds a source's data from
-          the start; use resync only when that is needed. Pages captured by the browser extension
-          cannot be resynced, because nothing holds their past copies to fetch again. See
+          the start; use resync only when that is needed.
+          <code>omnesis sources legacy-rows &lt;id&gt;</code> lists, claims or drops the rows of a
+          shared analytics table that no account has claimed. Pages captured by the browser
+          extension cannot be resynced, because nothing holds their past copies to fetch again. See
           <a href="/docs/sources#managing-sources">Managing sources</a> for every source action.
         </p>
         <p>
@@ -1162,7 +1313,8 @@ Gateway 1.4.0  <span class="t-dim">·</span>  <span class="t-dim">devices: 3 cur
               </tr>
               <tr>
                 <td>
-                  <code>model</code>, <code>backend</code>, <code>codex</code>, <code>index</code>
+                  <code>model</code>, <code>backend</code>, <code>codex</code>,
+                  <code>claude-code</code>, <code>index</code>
                 </td>
                 <td>Assign models, add inference backends, rebuild the vector index</td>
                 <td><a href="#models">Models</a></td>

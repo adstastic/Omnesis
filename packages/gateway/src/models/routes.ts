@@ -49,6 +49,7 @@ import {
   type CapabilityRole,
   type InferenceOverview,
   type BackendStatus,
+  type ClaudeCodeBackendStatus,
   type CodexBackendStatus,
   type CodexLoginFlow,
   type CodexRuntimeUpdateSnapshot,
@@ -58,11 +59,8 @@ import { scope } from "../http/scope.js";
 import { BadRequestError, ConflictError, ValidationError } from "../http/errors.js";
 import { CodexRuntimeUpdateConflictError } from "./codex-runtime-updater.js";
 import { CodexRuntimeLifecycleConflictError } from "./codex-runtime-lifecycle.js";
-import {
-  CodexAgentSetupConflictError,
-  CodexAgentSetupUnavailableError,
-} from "./codex-agent-setup.js";
-import type { CodexAgentSetupResult } from "./codex-agent-setup.js";
+import { AgentSetupConflictError, AgentSetupUnavailableError } from "./agent-assignment-setup.js";
+import type { AgentSetupResult } from "./agent-assignment-setup.js";
 import type { RecentModelsResult } from "./recent-models.js";
 import type { ConfigStore } from "../config-store.js";
 import type { ModelManager } from "./manager.js";
@@ -82,10 +80,9 @@ export const CAPABILITY_TO_CATALOG: Partial<Record<CapabilityRole, ModelRole>> =
   transcriber: "transcribe",
   "background-agent": "agent",
   "watch-judge": "agent",
-  // The brief judge and the entailment verifier take the same agent-class
-  // models as every other chat role (the portal already offers them there) —
-  // without a mapping the activate endpoint rejects their capability.
-  "brief-judge": "agent",
+  // The entailment verifier takes the same agent-class models as every other
+  // chat role (the portal already offers them there) — without a mapping the
+  // activate endpoint rejects its capability.
   "entailment-verifier": "agent",
 };
 
@@ -106,7 +103,7 @@ interface RegisterOptions {
   ) => Promise<import("@omnesis/core").CapabilityVerdict>;
   getCodexStatus?: () => CodexBackendStatus;
   refreshCodexStatus?: () => Promise<CodexBackendStatus>;
-  setupCodexAgent?: (model: string) => Promise<CodexAgentSetupResult>;
+  setupCodexAgent?: (model: string) => Promise<AgentSetupResult>;
   getCodexRuntimeUpdate?: () => Promise<CodexRuntimeUpdateSnapshot>;
   startCodexRuntimeUpdate?: (opts: { dryRun: boolean }) => Promise<CodexRuntimeUpdateSnapshot>;
   cancelCodexRuntimeUpdate?: () => Promise<CodexRuntimeUpdateSnapshot>;
@@ -115,6 +112,8 @@ interface RegisterOptions {
   cancelCodexLogin?: () => Promise<{ ok: true; canceled: boolean; flow: CodexLoginFlow | null }>;
   logoutCodex?: () => Promise<{ ok: true; status: CodexBackendStatus }>;
   refreshAnthropicStatus?: () => Promise<BackendStatus | undefined>;
+  refreshClaudeCodeStatus?: () => Promise<ClaudeCodeBackendStatus>;
+  setupClaudeCodeAgent?: (model: string) => Promise<AgentSetupResult>;
   /**
    * "Recently used" entries for a reference capability (see
    * `recent-models.ts`). Optional so partial test servers without a history
@@ -139,14 +138,13 @@ const REASONING_ROLES = new Set<CapabilityRole>([
   "background-agent",
   "watch-judge",
   "entailment-verifier",
-  "brief-judge",
 ]);
 
 const codexRuntimeUpdateBodySchema = z.strictObject({
   dryRun: z.boolean().optional(),
 });
 
-const codexAgentSetupBodySchema = z.strictObject({
+const agentSetupBodySchema = z.strictObject({
   model: z.string().trim().min(1).max(200),
 });
 
@@ -229,7 +227,7 @@ export function registerModelRoutes(app: RouteApp, opts: RegisterOptions): void 
     const { assignment, values, expectedValues } = parsed.data;
     const result = await configStore.update((current) => {
       const inference = modelInferenceOverview();
-      if (!["http", "codex"].includes(inference.assignments[role]?.kind)) {
+      if (!["http", "codex", "claude-code"].includes(inference.assignments[role]?.kind)) {
         throw new BadRequestError("Reasoning controls require a configurable model assignment");
       }
       const active = opts.modelsDevCatalog!.overview(inference, current).modelSettings[role]
@@ -464,7 +462,7 @@ export function registerModelRoutes(app: RouteApp, opts: RegisterOptions): void 
     if (!opts.setupCodexAgent) {
       throw new BadRequestError("Codex agent setup is not available");
     }
-    const parsed = codexAgentSetupBodySchema.safeParse(await c.req.json().catch(() => null));
+    const parsed = agentSetupBodySchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new BadRequestError("body must contain only model (a non-empty string)");
     }
@@ -472,10 +470,39 @@ export function registerModelRoutes(app: RouteApp, opts: RegisterOptions): void 
       const result = await opts.setupCodexAgent(parsed.data.model);
       return c.json({ ok: true, ...result });
     } catch (error) {
-      if (error instanceof CodexAgentSetupUnavailableError) {
+      if (error instanceof AgentSetupUnavailableError) {
         throw new BadRequestError(error.message);
       }
-      if (error instanceof CodexAgentSetupConflictError) {
+      if (error instanceof AgentSetupConflictError) {
+        throw new ConflictError(error.message);
+      }
+      throw error;
+    }
+  });
+
+  app.post("/admin/inference/claude-code/refresh", scope.admin(), async (c) => {
+    if (!opts.refreshClaudeCodeStatus) {
+      throw new BadRequestError("Claude Code backend is not available");
+    }
+    return c.json(await opts.refreshClaudeCodeStatus());
+  });
+
+  app.post("/admin/inference/claude-code/agent", scope.admin(), async (c) => {
+    if (!opts.setupClaudeCodeAgent) {
+      throw new BadRequestError("Claude Code agent setup is not available");
+    }
+    const parsed = agentSetupBodySchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new BadRequestError("body must contain only model (a non-empty string)");
+    }
+    try {
+      const result = await opts.setupClaudeCodeAgent(parsed.data.model);
+      return c.json({ ok: true, ...result });
+    } catch (error) {
+      if (error instanceof AgentSetupUnavailableError) {
+        throw new BadRequestError(error.message);
+      }
+      if (error instanceof AgentSetupConflictError) {
         throw new ConflictError(error.message);
       }
       throw error;
@@ -561,18 +588,24 @@ export function registerModelRoutes(app: RouteApp, opts: RegisterOptions): void 
       }
       throw err;
     }
-    const assignments = configStore.get().inference?.assignments ?? {};
-    const clearedAssignments: string[] = [];
-    const patch: Partial<Record<CapabilityRole, null>> = {};
-    for (const [role, value] of Object.entries(assignments)) {
-      if (typeof value !== "string" || !value.startsWith("codex/")) continue;
-      patch[role as CapabilityRole] = null;
-      clearedAssignments.push(role);
-    }
-    if (clearedAssignments.length > 0) {
-      const res = await configStore.patch({ inference: { assignments: patch } });
-      if (!res.ok) throw new ValidationError("config patch failed", res.errors);
-    }
+    const clearedAssignments = await clearAssignmentsFor(configStore, "codex");
     return c.json({ ...result, clearedAssignments });
   });
+}
+
+/** Unassign every role served by a built-in backend; returns the roles cleared. */
+async function clearAssignmentsFor(configStore: ConfigStore, backend: "codex"): Promise<string[]> {
+  const assignments = configStore.get().inference?.assignments ?? {};
+  const clearedAssignments: string[] = [];
+  const patch: Partial<Record<CapabilityRole, null>> = {};
+  for (const [role, value] of Object.entries(assignments)) {
+    if (typeof value !== "string" || !value.startsWith(`${backend}/`)) continue;
+    patch[role as CapabilityRole] = null;
+    clearedAssignments.push(role);
+  }
+  if (clearedAssignments.length > 0) {
+    const res = await configStore.patch({ inference: { assignments: patch } });
+    if (!res.ok) throw new ValidationError("config patch failed", res.errors);
+  }
+  return clearedAssignments;
 }

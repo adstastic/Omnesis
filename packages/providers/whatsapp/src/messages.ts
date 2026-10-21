@@ -11,7 +11,7 @@ import {
   deriveAttachmentStableId,
 } from "@omnesis/core";
 import { makeCursorValidator } from "@omnesis/source-sdk";
-import { SourceId, ProviderId, isTransientSyncError } from "@omnesis/types";
+import { SourceId, ProviderId, SyncError, isTransientSyncError } from "@omnesis/types";
 import {
   normalizeDayChat,
   buildContactsByLidJid,
@@ -24,14 +24,26 @@ import type {
   AudioTranscribeFn,
   TranscriptionPerson,
 } from "@omnesis/core";
-import type { HistoryCoverage, SyncCursor, SyncResult, Unsubscribe } from "@omnesis/source-sdk";
+import type {
+  HistoryCoverage,
+  SyncCursor,
+  SyncOptions,
+  SyncResult,
+  Unsubscribe,
+} from "@omnesis/source-sdk";
 import type {
   DocumentInput,
   SourceId as SourceIdType,
   ProviderId as ProviderIdType,
 } from "@omnesis/types";
 import type { MessageStore } from "./message-store.js";
-import type { WhatsAppSyncCursor, StoredMessage, MediaOutcome, StoredContact } from "./types.js";
+import type {
+  WhatsAppConnectionFailure,
+  WhatsAppSyncCursor,
+  StoredMessage,
+  MediaOutcome,
+  StoredContact,
+} from "./types.js";
 
 const log = createLogger("source:whatsapp");
 
@@ -63,16 +75,26 @@ const validateWhatsAppSyncCursor = makeCursorValidator(isWhatsAppSyncCursor);
 
 /**
  * Bound optional durable-media enrichment per page so primary messages stay
- * fresh even when the retry backlog contains slow OCR or voice-note work.
+ * fresh even when the retry backlog contains slow OCR or voice-note work. A
+ * backlog is worked through page after page instead (see `sync`).
  */
 const DEFAULT_MEDIA_ATTEMPTS_PER_PAGE = 1;
 
+/**
+ * Time a run must still have before its deadline for the source to ask for
+ * another media page. One voice note or OCR call can take minutes on a slow
+ * backend; a run that stops short leaves the rest to the retry wake.
+ */
+const MEDIA_CONTINUATION_MARGIN_MS = 15 * 60_000;
+
 interface MediaAttemptBudget {
   remaining: number;
-  deferred: { chatJid: string; id: string }[];
+  /** The durable media this page admitted. */
+  attempted: { chatJid: string; id: string }[];
 }
 
 export interface WhatsAppMessagesSourceOptions {
+  isTranscriptionVocabularyEnabled?: () => boolean;
   /** ISO 8601 date string. Documents with sourceCreatedAt older than this are filtered out. */
   dataCutoff?: string;
   attachmentConfig?: AttachmentExtractionConfig;
@@ -90,6 +112,8 @@ export interface WhatsAppMessagesSourceOptions {
   onConnectionError?: (handler: (error: string) => void) => void;
   /** Stop reporting to `handler`, so a torn-down source goes quiet. */
   offConnectionError?: (handler: (error: string) => void) => void;
+  /** Why the connection cannot deliver messages right now, or null while it can. */
+  connectionFailure?: () => WhatsAppConnectionFailure | null;
 }
 
 /**
@@ -101,6 +125,7 @@ export class WhatsAppMessagesSource {
   readonly id: SourceIdType;
   readonly providerId: ProviderIdType;
 
+  private isTranscriptionVocabularyEnabled?: () => boolean;
   /** Optional ISO 8601 cutoff — documents older than this are skipped */
   private dataCutoff: string | undefined;
 
@@ -111,6 +136,7 @@ export class WhatsAppMessagesSource {
   private mediaAttemptsPerPage: number;
   private registerConnectionError?: (handler: (error: string) => void) => void;
   private unregisterConnectionError?: (handler: (error: string) => void) => void;
+  private connectionFailure?: () => WhatsAppConnectionFailure | null;
 
   constructor(
     private store: MessageStore,
@@ -125,6 +151,7 @@ export class WhatsAppMessagesSource {
     this.extractAttachment = options?.extractAttachment;
     this.downloadMedia = options?.downloadMedia;
     this.transcribeAudio = options?.transcribeAudio;
+    this.isTranscriptionVocabularyEnabled = options?.isTranscriptionVocabularyEnabled;
     this.mediaAttemptsPerPage = options?.mediaAttemptsPerPage ?? DEFAULT_MEDIA_ATTEMPTS_PER_PAGE;
     if (!Number.isSafeInteger(this.mediaAttemptsPerPage) || this.mediaAttemptsPerPage <= 0) {
       throw new Error("mediaAttemptsPerPage must be a positive safe integer");
@@ -137,6 +164,7 @@ export class WhatsAppMessagesSource {
       minTimestamp: this.dataCutoff ? Math.ceil(Date.parse(this.dataCutoff) / 1000) : null,
     });
     this.unregisterConnectionError = options?.offConnectionError;
+    this.connectionFailure = options?.connectionFailure;
     if (this.dataCutoff) {
       log.info(`Data age cutoff: ${this.dataCutoff}`);
     }
@@ -153,7 +181,9 @@ export class WhatsAppMessagesSource {
 
   /**
    * Register a callback for connection errors.
-   * Fires when the WhatsApp device is unlinked or connection is permanently lost.
+   * Fires when the WhatsApp device is unlinked or the connection stops
+   * reconnecting. The source stays wired: the provider wakes a sync through
+   * the push path once the link is back, and that sync clears the error.
    */
   onSourceError(handler: (error: string) => void): Unsubscribe {
     this.registerConnectionError?.(handler);
@@ -172,20 +202,34 @@ export class WhatsAppMessagesSource {
     this.store.markAllDirty();
   }
 
-  async sync(cursor: SyncCursor | null): Promise<SyncResult> {
+  async sync(cursor: SyncCursor | null, opts?: SyncOptions): Promise<SyncResult> {
+    // Fail while the link is down so a scheduled sync cannot report the source
+    // healthy from what the store buffered before the outage. The buffered
+    // messages stay dirty and drain on the first sync after recovery.
+    const failure = this.connectionFailure?.();
+    if (failure) throw new SyncError(failure.kind, failure.message);
+    const vocabularyEnabled = this.isTranscriptionVocabularyEnabled?.() === true;
     const state: WhatsAppSyncCursor = validateWhatsAppSyncCursor(cursor) ?? {
       phase: "bootstrap",
       lastTimestamp: 0,
       committedSeq: 0,
     };
+    const committedSeq = state.storeId === this.store.storeId ? (state.committedSeq ?? 0) : 0;
+    this.store.reconcileSelfAuthoredTextNormalization(committedSeq, vocabularyEnabled);
+    const vocabularyBackfillPending = vocabularyEnabled
+      ? this.store.enrollSelfAuthoredTextNormalization()
+      : false;
 
     // Media retry sweep (before draining): re-dirty eligible media days whose
     // backoff window has elapsed, so they re-render and the download is retried.
     // This decouples retries from chat activity — a voice note that failed to
     // download on a now-past day still gets retried on schedule, rather than
     // only if someone happens to message that day again.
+    //
+    // Only as many days as this page can process are re-armed, so a backlog
+    // never crowds out primary messages; the rest follow on later pages.
     if (this.downloadMedia) {
-      const rearmed = this.store.markDueMediaDirty();
+      const rearmed = this.store.markDueMediaDirty(undefined, this.mediaAttemptsPerPage);
       if (rearmed > 0) log.debug(`Re-armed ${rearmed} day(s) with media due for retry`);
     }
 
@@ -196,7 +240,7 @@ export class WhatsAppMessagesSource {
     // GCs messages — re-emission is always recoverable.
     const { dirtyKeys, messagesByKey, chats, contacts, lidPhoneMap, emitSeq, morePending } =
       this.store.drain({
-        committedSeq: state.storeId === this.store.storeId ? (state.committedSeq ?? 0) : 0,
+        committedSeq,
       });
 
     log.debug("Draining message store", {
@@ -223,10 +267,7 @@ export class WhatsAppMessagesSource {
     // Only durable `pending` rows consume this page-wide budget. Legacy media
     // has no independent retry wakeup, so it retains its uncapped opportunistic
     // behavior until a resync enrolls it in the lifecycle.
-    const mediaBudget: MediaAttemptBudget = {
-      remaining: this.mediaAttemptsPerPage,
-      deferred: [],
-    };
+    const mediaBudget: MediaAttemptBudget = { remaining: this.mediaAttemptsPerPage, attempted: [] };
 
     for (const [key, messages] of messagesByKey) {
       if (messages.length === 0) continue;
@@ -282,6 +323,7 @@ export class WhatsAppMessagesSource {
         this.id,
         lidPhoneMap,
         contactsByLidJid,
+        vocabularyEnabled,
       );
 
       // Post-filter safety: skip documents whose sourceCreatedAt is before the cutoff
@@ -310,13 +352,6 @@ export class WhatsAppMessagesSource {
       });
     }
 
-    if (mediaBudget.deferred.length > 0) {
-      this.store.deferMediaAttempts(mediaBudget.deferred);
-      log.debug(
-        `Deferred ${mediaBudget.deferred.length} durable media item(s) after ${this.mediaAttemptsPerPage} attempt(s)`,
-      );
-    }
-
     // No GC: the durable store keeps every message. Dirty rows for this page
     // were stamped with `emitSeq` and are cleared only once a later sync()
     // observes the gateway-confirmed `committedSeq` (see store.drain()).
@@ -333,7 +368,17 @@ export class WhatsAppMessagesSource {
     // re-pair / a one-time backup import, not an endless sync loop.
     const historyState = this.store.historySyncState;
     const historyComplete = historyState === "complete";
-    const hasMore = morePending || historyState === "streaming";
+    // A media backlog keeps the run going page after page while this page used
+    // its budget, other media is due, and the run has time left; otherwise the
+    // store's retry wake picks it up in a later run. Media this page already
+    // tried does not count, so an item due again at once cannot spin the run.
+    const deadline = opts?.run?.deadline;
+    const mediaContinues =
+      mediaBudget.remaining === 0 &&
+      (deadline === undefined || deadline - Date.now() > MEDIA_CONTINUATION_MARGIN_MS) &&
+      this.store.hasDueMedia(mediaBudget.attempted);
+    const hasMore =
+      morePending || vocabularyBackfillPending || historyState === "streaming" || mediaContinues;
 
     const phase = historyComplete ? "incremental" : "bootstrap";
     // Coverage reports whether the synced corpus is whole. WhatsApp only serves
@@ -366,6 +411,12 @@ export class WhatsAppMessagesSource {
         );
       }
     }
+
+    if (vocabularyEnabled)
+      this.store.recordSelfAuthoredTextNormalizationEmission(
+        emitSeq,
+        !vocabularyBackfillPending && !morePending,
+      );
 
     return {
       documents,
@@ -701,18 +752,15 @@ export class WhatsAppMessagesSource {
   }
 
   /**
-   * Admit one expensive download+processing pipeline. Deferral postpones only
-   * the due time; lifecycle state, attempt count, and error remain untouched.
-   * The store's retry timer re-dirties the day on a later source run.
+   * Admit one expensive download+processing pipeline. Media left out stays
+   * due, untouched, for a later page.
    */
   private acquireMediaAttempt(msg: StoredMessage, budget: MediaAttemptBudget): boolean {
     if (msg.mediaState !== "pending") return true;
-    if (budget.remaining > 0) {
-      budget.remaining -= 1;
-      return true;
-    }
-    budget.deferred.push({ chatJid: msg.chatJid, id: msg.id });
-    return false;
+    if (budget.remaining <= 0) return false;
+    budget.remaining -= 1;
+    budget.attempted.push({ chatJid: msg.chatJid, id: msg.id });
+    return true;
   }
 
   /**

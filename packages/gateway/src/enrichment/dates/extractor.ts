@@ -20,13 +20,9 @@
  * Pure and stateless apart from the one-time per-culture model build; runs on
  * the CPU worker pool (`cpu.extractDatesFromDocs`), so it never touches the
  * main event loop, the writer, or a user-serving read handle.
- *
- * Library note: `@microsoft/recognizers-text-date-time` ships CommonJS/UMD
- * only, so it must be imported via NAMED imports (the `default` export is the
- * namespace object, not the recognizer class).
  */
 
-import { DateTimeRecognizer } from "@microsoft/recognizers-text-date-time";
+import { dateTimeModel, type RtModelResult, type RtResolutionValue } from "./recognizer.js";
 import {
   routeDateCulture,
   ENGLISH_CULTURE,
@@ -265,43 +261,6 @@ const CULTURE_RULES: Record<DateCulture, CultureTextRules> = {
   },
 };
 
-/** The recognizer's result shape (its shipped typings are loose — narrow here). */
-interface RtResolutionValue {
-  timex?: string;
-  type?: string;
-  value?: string;
-  start?: string;
-  end?: string;
-  Mod?: string;
-}
-interface RtModelResult {
-  start: number;
-  /** Index of the LAST matched char (inclusive). */
-  end: number;
-  text: string;
-  /** e.g. "datetimeV2.date", "datetimeV2.daterange", "datetimeV2.duration". */
-  typeName: string;
-  resolution?: { values?: RtResolutionValue[] };
-}
-interface RtModel {
-  parse(query: string, referenceDate?: Date): RtModelResult[];
-}
-
-// Build one recognizer model per culture per worker, lazily — each is a few
-// MB and stateless; `parse(text, anchor)` takes the anchor per call, so one
-// model per culture serves every document with its own emission date.
-const _models = new Map<DateCulture, RtModel>();
-function model(culture: DateCulture): RtModel {
-  let m = _models.get(culture);
-  if (!m) {
-    // fallbackToDefaultCulture=false: a culture missing from the JS build
-    // must throw loudly here, never silently parse with English.
-    m = new DateTimeRecognizer(culture).getDateTimeModel(culture, false) as unknown as RtModel;
-    _models.set(culture, m);
-  }
-  return m;
-}
-
 /**
  * Build the anchor `Date` from the document's ISO emission timestamp. The
  * recognizer resolves relative expressions against the anchor's LOCAL
@@ -444,6 +403,27 @@ function pickForwardValue(values: RtResolutionValue[], anchor: Date): RtResoluti
   return keyed.sort((a, b) => b.k.localeCompare(a.k))[0].v;
 }
 
+/** An ISO date and time the recognizer read, up to the minute or the second. */
+const ISO_DATE_TIME = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?$/u;
+
+/** What may follow such a date and time to make it an instant: seconds, a fraction, an offset. */
+const INSTANT_TAIL = /^(?::\d{2})?(?:[.,]\d{1,9})?(?:Z|[+-](?:0\d|1[0-4]):?\d{2})(?![\w:+-])/u;
+
+/**
+ * The end of a match, extended over the rest of the ISO instant it begins.
+ *
+ * The recognizer reads `2026-10-18T17:28:00Z` as `2026-10-18T17:28`: the
+ * seconds, the fraction and the offset fall outside its match. Stored as is,
+ * the phrase names a clock time in no zone, which a reader takes for a local
+ * time when it is UTC. Keeping the whole instant keeps its offset, so the
+ * phrase stays the moment the document wrote.
+ */
+function instantEnd(content: string, start: number, end: number): number {
+  if (!ISO_DATE_TIME.test(content.slice(start, end))) return end;
+  const tail = INSTANT_TAIL.exec(content.slice(end, end + 16));
+  return tail ? end + tail[0].length : end;
+}
+
 /** Normalize one recognizer result into zero or one ExtractedDate, or null when
  *  it has no concrete year (so it must be dropped). */
 function normalizeResult(
@@ -455,13 +435,14 @@ function normalizeResult(
   const values = r.resolution?.values ?? [];
   if (values.length === 0) return null;
   const subtype = subtypeOf(r.typeName);
-  const text = content.slice(r.start, r.end + 1);
+  const charEnd = instantEnd(content, r.start, r.end + 1);
+  const text = content.slice(r.start, charEnd);
   if (rules.restCompound?.test(text)) return null;
   const base = {
     relative: rules.relativeMarker.test(text),
     text,
     charStart: r.start,
-    charEnd: r.end + 1,
+    charEnd,
   };
 
   switch (subtype) {
@@ -657,7 +638,7 @@ export function scanDatesFromText(
 
     let results: RtModelResult[];
     try {
-      results = model(culture).parse(chunk, anchor);
+      results = dateTimeModel(culture).parse(chunk, anchor);
     } catch {
       // A single malformed chunk must never sink the document.
       continue;

@@ -14,6 +14,7 @@ import { TEMPORAL_STATUSES } from "@omnesis/types";
 import { countPendingDateExtraction } from "../dates/storage.js";
 import { projectionRevision } from "../temporal-projections/derive.js";
 import { MENTION_ORIGIN_RANK, readMentionPage } from "./temporal-mentions.js";
+import { annotationMatchesScope, normalizedAnnotationBounds } from "./annotation-scope.js";
 import { resolveTemporalRange } from "./temporal-range.js";
 import type Database from "better-sqlite3";
 import type {
@@ -277,54 +278,6 @@ function normalizedProjectionBounds(
   }
 }
 
-function normalizedAnnotationBounds(
-  row: {
-    precision: string;
-    canonical: string | null;
-    startMs: number;
-    endExclusiveMs: number;
-  },
-  timeZone: string,
-): { startMs: number; endExclusiveMs: number; allDay: boolean } {
-  const fallback = {
-    startMs: row.startMs,
-    endExclusiveMs: row.endExclusiveMs,
-    allDay: row.precision !== "instant",
-  };
-  if (!row.canonical || row.precision === "instant") return fallback;
-
-  const resolve = (value: string) => {
-    try {
-      return resolveTemporalRange({ from: value.trim(), timeZone });
-    } catch {
-      return null;
-    }
-  };
-  if (row.precision === "day" || row.precision === "month" || row.precision === "year") {
-    const period = resolve(row.canonical);
-    return period
-      ? {
-          startMs: period.fromMs,
-          endExclusiveMs: period.toExclusiveMs,
-          allDay: true,
-        }
-      : fallback;
-  }
-  if (row.precision === "range") {
-    const tokens = row.canonical.split(" .. ");
-    if (tokens.length !== 2) return fallback;
-    const first = resolve(tokens[0]);
-    const second = resolve(tokens[1]);
-    if (!first || !second) return fallback;
-    return {
-      startMs: Math.min(first.fromMs, second.fromMs),
-      endExclusiveMs: Math.max(first.toExclusiveMs, second.toExclusiveMs),
-      allDay: !tokens.every((token) => token.includes("T")),
-    };
-  }
-  return fallback;
-}
-
 const overlaps = intervalOverlapsWindow;
 
 /** Layers read when a query names none. Mentions are asked for by name. */
@@ -436,6 +389,81 @@ export class TemporalQueryService {
     input: TemporalQueryInput,
     execution?: { maxWindowMs?: number; signal?: AbortSignal },
   ): Promise<TemporalQueryResult> {
+    const read = await this.readWindow(input, execution);
+    const { effectiveInput, range, limit, ranked, mentions, hideUnworthy } = read;
+    // Anchored = the item starts or ends inside the window, so the window is
+    // one of its own boundaries. A merely-spanning item (a long rental, a
+    // multi-year warranty) says nothing about the window's days; the counts
+    // cover every match so a paginated read still sees the whole picture.
+    let anchoredCount = ranked.filter((entry) => entry.item.anchored).length;
+    const visible = ranked.filter((entry) => !read.after || compareKeys(entry.key, read.after) > 0);
+    if (mentions) {
+      visible.push(...mentions.items);
+      visible.sort((left, right) => compareKeys(left.key, right.key));
+      anchoredCount += mentions.total;
+    }
+    const page = visible.slice(0, limit);
+    const truncated = visible.length > limit;
+    const coverage = await this.coverage(effectiveInput.sourceIds);
+    if (mentions) {
+      coverage.mentions = {
+        pendingDocuments: countPendingDateExtraction(this.db, effectiveInput.sourceIds),
+        ...(mentions.totalCapped ? { countCapped: true as const } : {}),
+        ...(hideUnworthy && !effectiveInput.documentIds?.length && !effectiveInput.entityIds?.length
+          ? { unworthyHidden: true as const }
+          : {}),
+      };
+    }
+    return {
+      type: "temporal.results",
+      window: {
+        start: new Date(range.fromMs).toISOString(),
+        endExclusive: new Date(range.toExclusiveMs).toISOString(),
+        timeZone: effectiveInput.timeZone,
+      },
+      items: page.map((entry) => entry.item),
+      summary: {
+        anchored: anchoredCount,
+        spanning: ranked.length + (mentions?.total ?? 0) - anchoredCount,
+      },
+      coverage,
+      truncated,
+      nextCursor:
+        truncated && page.length > 0
+          ? encodeCursor(read.fingerprint, page[page.length - 1].key)
+          : undefined,
+    };
+  }
+
+  /**
+   * The first `limit` items anchored inside the window, in the query's order,
+   * without the coverage, counts and cursor a reader of the whole window
+   * needs; items that merely span the window, which {@link query} pages
+   * through too, are left out. For callers that only want what a window
+   * holds, such as search's temporal lane.
+   */
+  async anchoredItems(
+    input: TemporalQueryInput,
+    execution?: { signal?: AbortSignal },
+  ): Promise<TemporalItem[]> {
+    const { ranked, mentions, limit } = await this.readWindow(
+      { ...input, cursor: undefined },
+      execution,
+    );
+    const anchored = ranked.filter((entry) => entry.item.anchored);
+    if (mentions) anchored.push(...mentions.items);
+    anchored.sort((left, right) => compareKeys(left.key, right.key));
+    return anchored.slice(0, limit).map((entry) => entry.item);
+  }
+
+  /**
+   * Every projection and annotation matching the window, ordered and marked
+   * anchored or spanning, and one page of its mentions past the cursor.
+   */
+  private async readWindow(
+    input: TemporalQueryInput,
+    execution?: { maxWindowMs?: number; signal?: AbortSignal },
+  ) {
     if (execution?.signal?.aborted) throw execution.signal.reason;
     const effectiveInput: TemporalQueryInput = {
       ...input,
@@ -487,55 +515,21 @@ export class TemporalQueryService {
     // stores, because a day-precision row's sort key is resolved in the
     // caller's time zone and so is not the key it was stored under. See #55.
     ranked.sort((left, right) => compareKeys(left.key, right.key));
-    // Anchored = the item starts or ends inside the window, so the window is
-    // one of its own boundaries. A merely-spanning item (a long rental, a
-    // multi-year warranty) says nothing about the window's days; the counts
-    // cover every match so a paginated read still sees the whole picture.
-    let anchoredCount = 0;
     for (const entry of ranked) {
       const { startMs, endExclusiveMs } = entry.key;
-      const anchored =
+      entry.item.anchored =
         (startMs >= range.fromMs && startMs < range.toExclusiveMs) ||
         (endExclusiveMs > range.fromMs && endExclusiveMs <= range.toExclusiveMs);
-      entry.item.anchored = anchored;
-      if (anchored) anchoredCount += 1;
-    }
-    const visible = ranked.filter((entry) => !after || compareKeys(entry.key, after) > 0);
-    if (mentions) {
-      visible.push(...mentions.items);
-      visible.sort((left, right) => compareKeys(left.key, right.key));
-      anchoredCount += mentions.total;
-    }
-    const page = visible.slice(0, limit);
-    const truncated = visible.length > limit;
-    const coverage = await this.coverage(effectiveInput.sourceIds);
-    if (mentions) {
-      coverage.mentions = {
-        pendingDocuments: countPendingDateExtraction(this.db, effectiveInput.sourceIds),
-        ...(mentions.totalCapped ? { countCapped: true as const } : {}),
-        ...(hideUnworthy && !effectiveInput.documentIds?.length && !effectiveInput.entityIds?.length
-          ? { unworthyHidden: true as const }
-          : {}),
-      };
     }
     return {
-      type: "temporal.results",
-      window: {
-        start: new Date(range.fromMs).toISOString(),
-        endExclusive: new Date(range.toExclusiveMs).toISOString(),
-        timeZone: effectiveInput.timeZone,
-      },
-      items: page.map((entry) => entry.item),
-      summary: {
-        anchored: anchoredCount,
-        spanning: ranked.length + (mentions?.total ?? 0) - anchoredCount,
-      },
-      coverage,
-      truncated,
-      nextCursor:
-        truncated && page.length > 0
-          ? encodeCursor(fingerprintValue, page[page.length - 1].key)
-          : undefined,
+      effectiveInput,
+      range,
+      limit,
+      fingerprint: fingerprintValue,
+      after,
+      ranked,
+      mentions,
+      hideUnworthy,
     };
   }
 
@@ -745,6 +739,7 @@ export class TemporalQueryService {
     const rows = this.db
       .prepare(
         `SELECT e.*,
+           (SELECT json_group_array(doc.source_id) FROM temporal_annotation_documents ad JOIN documents doc ON doc.id=ad.document_id WHERE ad.annotation_id=e.id) AS source_ids,
            (SELECT json_group_array(d.document_id)
               FROM temporal_annotation_documents d WHERE d.annotation_id = e.id) AS document_ids,
            (SELECT json_group_array(p.person_id)
@@ -784,7 +779,25 @@ export class TemporalQueryService {
         },
         input.timeZone,
       );
-      if (!overlaps(bounds, range)) return [];
+      if (
+        !annotationMatchesScope(
+          {
+            id,
+            intervalStartMs: storedStartMs,
+            intervalEndMs: inclusiveEnd,
+            precision: storedPrecision,
+            canonical: row.canonical == null ? null : String(row.canonical),
+            kind: row.kind == null ? null : String(row.kind),
+            documentIds: parseIds(row.document_ids),
+            sourceIds: parseIds(row.source_ids),
+            personIds: parseIds(row.person_ids),
+            loopIds: parseIds(row.loop_ids),
+            projectionIds: parseIds(row.projection_ids),
+          },
+          { ...input, ...range },
+        )
+      )
+        return [];
       const precision: TemporalPrecision =
         storedPrecision === "year" ||
         storedPrecision === "month" ||

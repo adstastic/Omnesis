@@ -34,14 +34,13 @@ import dev.omnesis.android.transport.client.AdminClient
 import dev.omnesis.android.transport.client.AgentClient
 import dev.omnesis.android.transport.client.AgentEventSource
 import dev.omnesis.android.transport.client.AnalyticsClient
-import dev.omnesis.android.transport.client.BriefsClient
 import dev.omnesis.android.transport.client.DocumentsClient
 import dev.omnesis.android.transport.client.GatewayClient
 import dev.omnesis.android.transport.client.NotesClient
 import dev.omnesis.android.transport.client.NotificationsClient
 import dev.omnesis.android.transport.client.SearchClient
+import dev.omnesis.android.transport.client.TasksClient
 import dev.omnesis.android.transport.client.WatchesClient
-import dev.omnesis.android.transport.dto.BriefsMenuEntry
 import dev.omnesis.android.transport.dto.ClaimedNotificationDelivery
 import dev.omnesis.android.transport.dto.DictationStatusDto
 import dev.omnesis.android.transport.dto.PushPlan
@@ -51,6 +50,7 @@ import dev.omnesis.android.transport.ws.DeviceSocket
 import dev.omnesis.android.ui.agent.AgentCoordinator
 import dev.omnesis.android.voice.SpeechVocabulary
 import dev.omnesis.android.transport.client.TranscriptionVocabularyClient
+import java.net.URI
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Provider
@@ -239,7 +239,7 @@ class SessionManager @Inject constructor(
         val agent: AgentClient,
         val notes: NotesClient,
         val watches: WatchesClient,
-        val briefs: BriefsClient,
+        val tasks: TasksClient,
         val socket: DeviceSocket,
         val analytics: AnalyticsClient,
         val documents: DocumentsClient,
@@ -319,12 +319,13 @@ class SessionManager @Inject constructor(
     val developerEnabled: StateFlow<Boolean> = _developerEnabled.asStateFlow()
 
     /**
-     * What the menu should show for Briefs, from the same `/status` probe. Cleared on
-     * every rebuild for the same reason as [experimentalEnabled]: a stale value from a
-     * prior pairing must not surface the feature against a gateway that lacks it.
+     * Whether the gateway serves the Tasks journal, from the same `/status` probe. Never
+     * gated on experimental mode. Cleared on every rebuild for the same reason as
+     * [experimentalEnabled]: a stale value from a prior pairing must not surface Tasks
+     * against a gateway that lacks it.
      */
-    private val _briefsMenuEntry = MutableStateFlow(BriefsMenuEntry.HIDDEN)
-    val briefsMenuEntry: StateFlow<BriefsMenuEntry> = _briefsMenuEntry.asStateFlow()
+    private val _tasksAvailable = MutableStateFlow(false)
+    val tasksAvailable: StateFlow<Boolean> = _tasksAvailable.asStateFlow()
 
     /**
      * The gateway-dictation gate from the same `/status` probe; null until it lands and
@@ -401,7 +402,7 @@ class SessionManager @Inject constructor(
                     continue
                 }
                 val http = GatewayHttp(
-                    PinnedOkHttp.build(pending.fingerprint),
+                    PinnedOkHttp.build(pending.fingerprint, host = hostOf(pending.url)),
                     pending.url,
                     pending.token,
                     pending.pairingGeneration,
@@ -486,7 +487,7 @@ class SessionManager @Inject constructor(
         // surface an experimental feature against a non-experimental gateway.
         _experimentalEnabled.value = false
         _developerEnabled.value = false
-        _briefsMenuEntry.value = BriefsMenuEntry.HIDDEN
+        _tasksAvailable.value = false
         _dictation.value = null
         _relayConsentPrompt.value = null
         _pushPlan.value = PushPlanState.Checking
@@ -503,19 +504,31 @@ class SessionManager @Inject constructor(
         }
         settleLocalState(pairing, atLaunch)
         val requirePin = pairing.tlsMode == PairingTlsMode.PINNED_LEAF
+        val host = hostOf(pairing.url)
+        val upgrade = { onSystemTrustVerified(pairing) }
         val http = GatewayHttp(
-            PinnedOkHttp.build(pairing.fingerprint, requirePin = requirePin),
+            PinnedOkHttp.build(
+                pairing.fingerprint,
+                requirePin = requirePin,
+                host = host,
+                onSystemTrustVerified = upgrade,
+            ),
             pairing.url,
             pairing.token,
             pairing.pairingGeneration,
         )
-        val streaming = PinnedOkHttp.buildStreaming(pairing.fingerprint, requirePin = requirePin)
+        val streaming = PinnedOkHttp.buildStreaming(
+            pairing.fingerprint,
+            requirePin = requirePin,
+            host = host,
+            onSystemTrustVerified = upgrade,
+        )
         val socket = DeviceSocket(
             client = streaming,
             gatewayUrl = pairing.url,
             token = pairing.token,
             scope = scope,
-            capabilities = deviceCapabilities,
+            capabilities = deviceCapabilities.withTlsMode(pairing.tlsMode.persistedValue),
         )
         val agent = AgentClient(http)
         val admin = AdminClient(http)
@@ -550,7 +563,7 @@ class SessionManager @Inject constructor(
             agent = agent,
             notes = NotesClient(http),
             watches = WatchesClient(http),
-            briefs = BriefsClient(http),
+            tasks = TasksClient(http),
             socket = socket,
             analytics = analytics,
             documents = documents,
@@ -564,7 +577,7 @@ class SessionManager @Inject constructor(
                 ?.let { token ->
                     NotificationsClient(
                         GatewayHttp(
-                            PinnedOkHttp.build(pairing.fingerprint, requirePin = requirePin),
+                            PinnedOkHttp.build(pairing.fingerprint, requirePin = requirePin, host = host),
                             pairing.url,
                             token,
                         ),
@@ -644,7 +657,7 @@ class SessionManager @Inject constructor(
             activitySegmentsIntegration.launchInitialSync(activitySegments, this)
             photosIntegration.launchInitialSync(photos, this)
         }
-        agentCoordinator.rebuild(agent, built.newAgentEventSource())
+        agentCoordinator.rebuild(agent, built.newAgentEventSource(), "${pairing.url}:${pairing.accountId}:${pairing.deviceId}")
         _state.value = AppState.Paired(pairing)
     }
 
@@ -799,7 +812,7 @@ class SessionManager @Inject constructor(
             if (session !== current) return@probe false
             _experimentalEnabled.value = status.experimental
             _developerEnabled.value = status.developer
-            _briefsMenuEntry.value = BriefsMenuEntry.from(status.briefs)
+            _tasksAvailable.value = status.tasks?.available == true
             _dictation.value = status.dictation
             this.current()?.let { childScope ->
                 speechVocabulary.cache.warm(status.transcriptionVocabulary, Locale.getDefault().toLanguageTag(), childScope, ownerToken = vocabularyOwner, fetch = current.vocabulary::fetch)
@@ -953,6 +966,7 @@ class SessionManager @Inject constructor(
                 PinnedOkHttp.build(
                     current.pairing.fingerprint,
                     requirePin = current.pairing.tlsMode == PairingTlsMode.PINNED_LEAF,
+                    host = hostOf(current.pairing.url),
                 ),
                 current.pairing.url,
                 minted.token,
@@ -1016,4 +1030,19 @@ class SessionManager @Inject constructor(
 
     private fun relayConsentIdentity(deviceId: String, appId: String): String =
         "$deviceId\u001f$appId"
+
+    /**
+     * A pinned session's gateway proved a publicly trusted certificate for its DNS
+     * name. Called on the TLS handshake thread, so it only posts: the main thread
+     * switches the pairing to system trust and rebuilds the session, the same path
+     * as a gateway URL change. A callback from a session that a re-pair, unpair or
+     * URL change has since replaced does nothing.
+     */
+    private fun onSystemTrustVerified(verified: Pairing) {
+        scope.launch(Dispatchers.Main) {
+            if (pairingService.current() == verified && pairingService.upgradeTrustToSystem()) rebuild()
+        }
+    }
+
+    private fun hostOf(url: String): String? = runCatching { URI(url).host }.getOrNull()
 }

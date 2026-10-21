@@ -108,7 +108,7 @@ omnesis sql "SELECT * FROM strava_activities LIMIT 5"
 
 [Search](https://omnesis.dev/docs/search) explains ranking, every filter, and SQL over your structured data.
 
-**The built-in agent** is off until you give it a model. It can run entirely on a local model, on a cloud provider, or on a ChatGPT subscription through Codex; nothing is sent to a remote model unless you allow remote inference. See [The agent](https://omnesis.dev/docs/agent) and [Models](https://omnesis.dev/docs/operating#models).
+**The built-in agent** is off until you give it a model. It can run entirely on a local model, on a cloud provider, on a ChatGPT subscription through Codex, or on a Claude subscription through your own Claude Code installation; nothing is sent to a remote model unless you allow remote inference. See [The agent](https://omnesis.dev/docs/agent) and [Models](https://omnesis.dev/docs/operating#models).
 
 **External agents** reach Omnesis through one MCP endpoint, `/mcp`, with OAuth. You approve each connection and choose its access level: **Answer**, where the Omnesis agent answers and a privacy reviewer checks the answer before it is released, **Direct**, raw read-only tools with no review, and **Notes**, which saves a note without granting any read access. Claude Code, Codex, Antigravity, OpenClaw and Hermes run on your machines and can use a private HTTPS address. This repository is also a plugin marketplace: the Claude Code plugin in `plugins/omnesis-claude` sets up the connection and teaches Claude how to use it, and the portable plugin in `plugins/omnesis` carries the same guidance for Codex and ChatGPT. ChatGPT and Claude's custom connectors connect from their providers' servers, so they need a public address, which [Tailscale Funnel](https://omnesis.dev/docs/connect#tailscale-funnel) provides without a domain of your own. See [Agents & MCP](https://omnesis.dev/docs/connect).
 
@@ -203,7 +203,7 @@ reserved; see [`TRADEMARKS.md`](TRADEMARKS.md).
 
 Two larger features are experimental: unstable research and exploration projects within the Omnesis code base, hidden unless the gateway starts with `OMNESIS_EXPERIMENTAL=1`.
 
-- **Omnesis Brain** reads your records in the background, without waiting for a question, and records what it learns: dates and deadlines buried in documents, open commitments, cited notes about documents and people, and occasional briefs worth your attention. It spends model tokens with nobody asking, so it has its own spend limits.
+- **Omnesis Brain** reads your records in the background, without waiting for a question, and records what it learns: dates and deadlines buried in documents, open commitments, cited notes about documents and people, and a once-a-day morning brief of what you may want to know. What you accept, ignore or give a thumbs to teaches it what you care about. It spends model tokens with nobody asking, so it has its own spend limits.
 - **Omnesis Watch** notices when a condition becomes true — an unanswered renewal notice, a trend in your health data — and can notify your phone or wake a paired agent. Each watch is a validated definition you can trial against history before turning delivery on.
 
 [Experimental](https://omnesis.dev/docs/experimental) documents both in detail. [Learn more about the Omnesis Brain →](https://omnesis.dev/brain)
