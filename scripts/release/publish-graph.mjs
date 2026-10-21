@@ -81,8 +81,13 @@ export function orderByDependencies(packages) {
 /** Normalize npm's single-package JSON report across CLI versions. */
 export function parsePackReport(stdout) {
   const report = JSON.parse(stdout);
-  // npm versions report a single packed package either directly or in an array.
-  const packed = Array.isArray(report) && report.length === 1 ? report[0] : report;
+  // npm 12 keys reports by package name; older CLIs return an array.
+  const reports = Array.isArray(report)
+    ? report
+    : report && typeof report === "object" && typeof report.filename !== "string"
+      ? Object.values(report)
+      : [report];
+  const packed = reports.length === 1 ? reports[0] : undefined;
   if (
     !packed ||
     typeof packed.integrity !== "string" ||
