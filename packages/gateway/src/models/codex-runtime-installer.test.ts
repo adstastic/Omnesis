@@ -55,16 +55,17 @@ async function materializeRuntime(prefix: string, opts: { bin?: string; version?
 
 function fakeRunner(
   calls: Array<{ command: string; args: readonly string[] }>,
+  version: string = CODEX_RUNTIME_COMPAT.testedVersion,
 ): CodexInstallCommandRunner {
   return async (command, args) => {
     calls.push({ command, args: [...args] });
     if (command === "synthetic-npm") {
       const prefix = args[args.indexOf("--prefix") + 1];
       if (!prefix) throw new Error("missing prefix");
-      await materializeRuntime(prefix);
+      await materializeRuntime(prefix, { version });
       return { stdout: "", stderr: "" };
     }
-    return { stdout: `codex-cli ${CODEX_RUNTIME_COMPAT.testedVersion}\n`, stderr: "" };
+    return { stdout: `codex-cli ${version}\n`, stderr: "" };
   };
 }
 
@@ -401,7 +402,7 @@ describe("CodexRuntimeInstaller", () => {
     for (const generation of [currentGeneration, orphanGeneration]) {
       const dir = join(paths.runtimeVersions, generation);
       await mkdir(dir, { recursive: true });
-      await materializeRuntime(dir);
+      await materializeRuntime(dir, { version: "0.151.0" });
     }
     await mkdir(paths.runtimeStore, { recursive: true });
     await writeFile(
@@ -415,7 +416,7 @@ describe("CodexRuntimeInstaller", () => {
     );
     const installer = new CodexRuntimeInstaller({
       configDir,
-      runner: fakeRunner([]),
+      runner: fakeRunner([], "0.151.0"),
       compatibilityProbe: async () => {},
     });
 
@@ -430,7 +431,9 @@ describe("CodexRuntimeInstaller", () => {
     const paths = codexPaths(configDir);
     const previousGeneration = "0.151.0--previous";
     await mkdir(join(paths.runtimeVersions, previousGeneration), { recursive: true });
-    await materializeRuntime(join(paths.runtimeVersions, previousGeneration));
+    await materializeRuntime(join(paths.runtimeVersions, previousGeneration), {
+      version: "0.151.0",
+    });
     await mkdir(paths.runtimeStore, { recursive: true });
     await writeFile(
       paths.runtimeCurrent,
@@ -445,7 +448,7 @@ describe("CodexRuntimeInstaller", () => {
     );
     const installer = new CodexRuntimeInstaller({
       configDir,
-      runner: fakeRunner([]),
+      runner: fakeRunner([], "0.151.0"),
       compatibilityProbe: async () => {},
       id: () => "recovery-read",
     });
@@ -467,7 +470,7 @@ describe("CodexRuntimeInstaller", () => {
     for (const generation of [currentGeneration, previousGeneration, orphanGeneration]) {
       const dir = join(paths.runtimeVersions, generation);
       await mkdir(dir, { recursive: true });
-      await materializeRuntime(dir);
+      await materializeRuntime(dir, { version: "0.151.0" });
     }
     await mkdir(paths.runtimeStaging, { recursive: true });
     await mkdir(join(paths.runtimeStaging, "interrupted"));
@@ -485,7 +488,7 @@ describe("CodexRuntimeInstaller", () => {
     );
     const installer = new CodexRuntimeInstaller({
       configDir,
-      runner: fakeRunner([]),
+      runner: fakeRunner([], "0.151.0"),
       compatibilityProbe: async () => {},
     });
 
