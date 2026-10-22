@@ -3,10 +3,10 @@
 
 import "./synth-env.js";
 
-import { readKnowledgeSourceEvidence } from "../../../gateway/src/brain/knowledge/source-evidence.js";
-import { parseContextualEntailment } from "../../../gateway/src/inference/contextual-entailment.js";
 import Database from "better-sqlite3";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { readKnowledgeSourceEvidence } from "../../../gateway/src/brain/knowledge/source-evidence.js";
+import { parseContextualEntailment } from "../../../gateway/src/inference/contextual-entailment.js";
 
 import { SyntheticE2EHarness } from "./synth-harness.js";
 import {
@@ -313,18 +313,22 @@ describe("interactive durable memory without the experimental Brain", () => {
     expect(recalledSystemPrompt).toContain(CORRECTED_QUOTE);
     expect(recalledSystemPrompt).not.toContain(PREFERENCE);
 
-    // Deleting the original conversation removes its evidence and every
-    // derivative, including the superseded row's retained audit text.
+    // Deleting the original conversation removes its evidence but never the
+    // memories built on it: they stop being served, and the live one turns
+    // unverified, kept for review.
     await harness.gatewayJson(`/agent/conversations/${sessionId}`, { method: "DELETE" });
     expect(await annotations(harness, `/people/${selfId}/annotations`)).toEqual([]);
     expect(
       db
         .prepare<
           [string],
-          { n: number }
-        >("SELECT COUNT(*) AS n FROM person_annotations WHERE evidence_doc_id = ?")
-        .get(prepared.documentId)?.n,
-    ).toBe(0);
+          { invalidated_at: number | null; verification_state: string | null }
+        >("SELECT invalidated_at, verification_state FROM person_annotations WHERE evidence_doc_id = ? ORDER BY invalidated_at IS NULL")
+        .all(prepared.documentId),
+    ).toEqual([
+      { invalidated_at: expect.any(Number), verification_state: expect.anything() },
+      { invalidated_at: null, verification_state: "unverified" },
+    ]);
     expect(
       db
         .prepare<[string], { id: string }>("SELECT id FROM documents WHERE id = ?")

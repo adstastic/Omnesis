@@ -26,7 +26,7 @@ import {
   call,
   compressCognitionCadences,
   email,
-  refreshCurrentOwner,
+  preserveCurrentOwner,
   ref,
   salienceDecisionPolicy,
   sourceInterpretations,
@@ -319,22 +319,7 @@ describe("brain bench: observations", () => {
       },
       entailment: ({ prompt }) => (prompt.includes(S.insurance.marker) ? "neutral" : "entailment"),
       behaviors: {
-        dynamic: sourceInterpretations({
-          sources: SOURCES,
-          // The review of the allotment observation, once its notice is
-          // deleted: the Brain withdraws it deliberately.
-          maintainNode: (item, ctx, steps) =>
-            item.node?.kind === "observation" &&
-            item.node.validity === "stale" &&
-            item.node.title.includes(S.allotment.marker)
-              ? {
-                  calls: [
-                    call("observation_withdraw", { id: item.node.ownerId }),
-                    call("knowledge_next_frontier", {}),
-                  ],
-                }
-              : refreshCurrentOwner(item, ctx, steps),
-        }),
+        dynamic: sourceInterpretations({ sources: SOURCES, maintainNode: preserveCurrentOwner }),
         behaviors: [
           {
             flavour: "daily.digest",
@@ -476,10 +461,15 @@ describe("brain bench: observations", () => {
     await bench.drainUntilQuiet();
 
     // A deleted cited document never takes its observation with it: the
-    // observation loses its citation and is reviewed, and the review withdraws it.
+    // observation loses its citation and is queued for review.
     const allotment = await bench.obs.observationsMatching(S.allotment.marker);
     expect(allotment).toHaveLength(1);
-    expect(allotment[0]).toMatchObject({ state: "dropped", closeReason: "withdrawn" });
+    expect(allotment[0]).toMatchObject({ citations: [] });
+    expect(
+      bench.sql
+        .prepare("SELECT 1 FROM knowledge_work WHERE subject_kind = 'node' AND subject_id = ?")
+        .get(allotment[0]!.id),
+    ).toBeDefined();
   }, 240_000);
 
   test("the morning recheck ships, holds and drops by the salience policy and ranks what ships", async () => {
