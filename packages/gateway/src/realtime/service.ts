@@ -19,8 +19,11 @@ import {
   RealtimeAdmissionError,
   type RealtimeCallError,
 } from "./call-error.js";
+import { LiveVoiceService } from "./live-service.js";
 import type { AgentTerminalFailure } from "@omnesis/core";
 import type { OmnesisConfig } from "@omnesis/config";
+import type { LiveProvider } from "./live-provider.js";
+import type { LiveVoiceUsageSample } from "./live-voice-usage.js";
 
 const MODEL = REALTIME_MODEL;
 const MAX_FRAME_BYTES = 128 * 1024;
@@ -89,6 +92,8 @@ export interface RealtimeDeps {
   isAuthorized(token: string, callerId: string): boolean;
   connect?: (apiKey: string) => WebSocket;
   logger?: Pick<ReturnType<typeof createLogger>, "info" | "warn">;
+  liveProvider?: (apiKey: string) => LiveProvider;
+  recordLiveUsage?: (sample: LiveVoiceUsageSample) => Promise<void>;
   recordUsage?: (
     usage: { promptTokens: number; completionTokens: number; cacheReadTokens?: number },
     model: string,
@@ -111,10 +116,23 @@ export function realtimeBackend(
 
 /** Each phone call owns its upstream socket and cancellation scope. No audio is persisted. */
 export class RealtimeService {
+  readonly live: LiveVoiceService;
   private readonly active = new Set<() => void>();
+  private disposing = false;
+  private disposal?: Promise<void>;
   private readonly log: Pick<ReturnType<typeof createLogger>, "info" | "warn">;
   constructor(private readonly deps: RealtimeDeps) {
     this.log = deps.logger ?? createLogger("gateway:realtime");
+    this.live = new LiveVoiceService({
+      backend: () => this.backend(),
+      getApiKey: (name) => deps.getApiKey(name),
+      getAgent: () => deps.getAgent(),
+      isAuthorized: (token, owner) => deps.isAuthorized(token, owner),
+      hasCapacity: () => this.active.size + this.live.activeCount < 4,
+      provider: deps.liveProvider,
+      recordUsage: deps.recordLiveUsage,
+      warn: (code) => this.log.warn(`Live voice event code=${code}`),
+    });
   }
 
   capability(): {
@@ -124,6 +142,7 @@ export class RealtimeService {
     canonicalAgentEvents: boolean;
     protocol: { min: number; max: number };
     audio: { format: string; sampleRate: number };
+    live?: ReturnType<LiveVoiceService["capability"]>;
   } {
     return {
       available: !!this.backend() && !!this.deps.getAgent(),
@@ -132,10 +151,12 @@ export class RealtimeService {
       canonicalAgentEvents: true,
       protocol: { min: 1, max: 2 },
       audio: { format: "pcm16", sampleRate: 24000 },
+      ...(this.live.capability() ? { live: this.live.capability() } : {}),
     };
   }
 
   private backend(): string | undefined {
+    if (this.disposing) return undefined;
     return realtimeBackend(this.deps.getConfig(), (name) => this.deps.getApiKey(name));
   }
 
@@ -150,6 +171,7 @@ export class RealtimeService {
       recoverableErrors?: boolean;
     },
   ): RealtimeConnection {
+    if (this.disposing) throw new RealtimeAdmissionError(callError("server_shutdown"));
     const backend = this.backend();
     const agent = this.deps.getAgent();
     const key = backend ? this.deps.getApiKey(backend) : undefined;
@@ -159,7 +181,8 @@ export class RealtimeService {
           !this.deps.isAuthorized(options.token, callerId) ? "pairing_rejected" : "unavailable",
         ),
       );
-    if (this.active.size >= 4) throw new RealtimeAdmissionError(callError("session_busy"));
+    if (this.active.size + this.live.activeCount >= 4)
+      throw new RealtimeAdmissionError(callError("session_busy"));
     const diagnosticId = randomUUID();
     const diagnostics = new RealtimeDiagnostics((message) =>
       this.log.info(`Call ${diagnosticId} ${message}`),
@@ -655,7 +678,26 @@ export class RealtimeService {
     };
   }
 
-  dispose(): void {
-    for (const close of this.active) close();
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
+    this.disposing = true;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    this.disposal = new Promise<void>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    // Install the shared completion before shutdown callbacks can reenter.
+    const liveDrain = this.live.dispose();
+    void liveDrain.then(resolve, reject);
+    for (const close of [...this.active]) {
+      try {
+        close();
+      } catch {
+        this.active.delete(close);
+        this.log.warn("Could not completely close a legacy voice call during shutdown");
+      }
+    }
+    return this.disposal;
   }
 }
