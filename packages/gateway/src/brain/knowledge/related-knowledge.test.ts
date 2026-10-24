@@ -405,19 +405,26 @@ it("queues a one-time review immediately, once per page and reason", async () =>
         "SELECT id,tier FROM knowledge_work WHERE subject_id='flat' AND reason='review' AND status='pending'",
       )
       .all();
-  const queue = oneTimePageReview(service, "chronological_log", () => "kw_once");
+  let serial = 0;
+  const queue = oneTimePageReview(service, "log_curation", () =>
+    serial++ ? `kw_once_${serial}` : "kw_once",
+  );
   await expect(queue("flat")).resolves.toBe(true);
   expect(getKnowledgeNode(db, "flat")!.metadata).toMatchObject({
     nextReviewAt: 10,
     reviewDecision: "now",
-    reviewReason: "chronological_log",
-    reviewRequests: { chronological_log: 10 },
+    reviewReason: "log_curation",
+    reviewRequests: { log_curation: 10 },
   });
   expect(reviews()).toEqual([{ id: "kw_once", tier: "immediate" }]);
   // Later passes over the same page do not queue it again, even after the review ran.
   db.prepare("UPDATE knowledge_work SET status='completed' WHERE id='kw_once'").run();
   await expect(queue("flat")).resolves.toBe(false);
   expect(reviews()).toEqual([]);
+  // A caller tracking its own progress may queue it again.
+  await expect(queue("flat", { again: true })).resolves.toBe(true);
+  expect(reviews()).toEqual([{ id: "kw_once_2", tier: "immediate" }]);
+  db.prepare("UPDATE knowledge_work SET status='completed' WHERE id='kw_once_2'").run();
   // A different reason is its own request; a missing page queues nothing.
   await expect(oneTimePageReview(service, "other_reason", () => "kw_other")("flat")).resolves.toBe(
     true,
