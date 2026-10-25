@@ -14,6 +14,11 @@ import {
   UpdateLockBusyError,
 } from "@omnesis/core";
 import { assertSourceNodeVersion } from "../update/source-node.js";
+import {
+  prepareSourceRecoveryLauncher,
+  sourceRecoveryLauncher,
+} from "../update/source-launcher.js";
+import { captureOwnedSourceLauncher } from "../update/package-migration-files.js";
 import { CliError, EXIT_CANCELLED, EXIT_FAILURE, EXIT_USER_ERROR } from "../utils.js";
 import {
   activeSourceApplyState,
@@ -2752,7 +2757,8 @@ describe("rolling back a failed update", () => {
         failed,
         clean,
         failed,
-        // The rollback: checkout, a failing install, its reset and retry, build.
+        // The rollback: checkout, clear the incomplete tree, failing install, retry, build.
+        clean,
         clean,
         failed,
         clean,
@@ -2771,6 +2777,7 @@ describe("rolling back a failed update", () => {
         "rm -rf node_modules",
         "npm ci",
         `git checkout --detach ${previousRef}`,
+        "rm -rf node_modules",
         "npm ci",
         "rm -rf node_modules",
         "npm ci",
@@ -2779,7 +2786,7 @@ describe("rolling back a failed update", () => {
     });
 
     test("a reset that fails reports the install's own failure and rolls back", async () => {
-      const runner = fakeRunner([...preflight, clean, failed, failed, ...rollback]);
+      const runner = fakeRunner([...preflight, clean, failed, failed, clean, ...rollback]);
       const failure = await source(makeDeps(runner)).then(
         unexpectedSuccess,
         (err: unknown) => err as Error,
@@ -2792,12 +2799,46 @@ describe("rolling back a failed update", () => {
       ]);
     });
 
-    test("a killed install is not retried: a second run meets the same memory shortage", async () => {
-      const runner = fakeRunner([...preflight, clean, { code: 137, stdout: "" }, ...rollback]);
-      await expect(source(makeDeps(runner))).rejects.toMatchObject({
-        message: expect.stringContaining("`npm ci` was killed (exit 137)"),
+    test.each([
+      { name: "exit 137", outcome: { code: 137, stdout: "" } },
+      { name: "SIGKILL", outcome: { code: 1, signal: "SIGKILL" as const, stdout: "" } },
+      { name: "SIGTERM", outcome: { code: 1, signal: "SIGTERM" as const, stdout: "" } },
+    ])(
+      "an install ended by $name skips an apply retry but clears the tree before rollback",
+      async ({ outcome }) => {
+        const state = fakeApplyState();
+        const runner = fakeRunner([...preflight, clean, outcome, clean, ...rollback]);
+        await expect(source(makeDeps(runner, { applyState: state.store }))).rejects.toMatchObject({
+          message: expect.stringContaining(`Rolled back to ${previousRef}.`),
+        });
+        expect(executed(runner).slice(1)).toEqual([
+          "git checkout --detach v0.3.0",
+          "npm ci",
+          `git checkout --detach ${previousRef}`,
+          "rm -rf node_modules",
+          "npm ci",
+          "npm run build",
+        ]);
+        expect(runner.calls.find(({ spec }) => spec.command === "rm")?.spec.cwd).toBe(rootDir);
+        expect(state.writes.at(-1)).toEqual(completedSourceApplyState(rootDir, previousRef));
+      },
+    );
+
+    test("a final failed dependency install cannot reinstall over a tree whose rollback reset fails", async () => {
+      const state = fakeApplyState();
+      const runner = fakeRunner([...preflight, clean, failed, clean, failed, clean, failed]);
+      await expect(source(makeDeps(runner, { applyState: state.store }))).rejects.toMatchObject({
+        message: expect.stringContaining("rollback also failed at `rm -rf node_modules`"),
       });
-      expect(executed(runner)).not.toContain("rm -rf node_modules");
+      expect(executed(runner).slice(1)).toEqual([
+        "git checkout --detach v0.3.0",
+        "npm ci",
+        "rm -rf node_modules",
+        "npm ci",
+        `git checkout --detach ${previousRef}`,
+        "rm -rf node_modules",
+      ]);
+      expect(state.writes.map((value) => value.phase)).toEqual(["applying", "rolling-back"]);
     });
 
     test("a failing build is not a reason to reinstall", async () => {
@@ -2855,6 +2896,7 @@ describe("rolling back a failed update", () => {
         ...preflight,
         clean,
         { code: 1, signal: "SIGKILL", stdout: "" },
+        clean,
         ...rollback,
       ]);
       await expect(source(makeDeps(signalled.runner))).rejects.toMatchObject({
@@ -2867,6 +2909,36 @@ describe("rolling back a failed update", () => {
       );
       expect(failure.message).toContain("`npm run build` failed (exit 2).");
       expect(failure.message).not.toContain("out of memory");
+    });
+
+    test("an OOM-killed install stops both daemons before clearing its incomplete rollback tree", async () => {
+      const { events, runner, services } = recording([
+        ...preflight,
+        clean,
+        killedBuild,
+        clean,
+        ...rollback,
+      ]);
+      await expect(
+        source(
+          makeDeps(runner, {
+            roles: hostRoles({ gateway: supervised, collector: supervised }),
+            ...services,
+          }),
+        ),
+      ).rejects.toMatchObject({ message: expect.stringContaining("Rolled back") });
+      expect(events.slice(1)).toEqual([
+        "git checkout --detach v0.3.0",
+        "npm ci",
+        "stop gateway",
+        "stop collector",
+        `git checkout --detach ${previousRef}`,
+        "rm -rf node_modules",
+        "npm ci",
+        "npm run build",
+        "restart gateway",
+        "start collector",
+      ]);
     });
 
     test("the plan names the stopped collector, before the apply", async () => {
@@ -3064,11 +3136,12 @@ describe("rolling back a failed update", () => {
   });
 
   test.each([
-    ["SIGINT", 130, "SIGTERM"],
-    ["SIGTERM", 143, "SIGINT"],
+    ["SIGINT", 130, "SIGTERM", 1],
+    ["SIGTERM", 143, "SIGINT", 1],
+    ["SIGTERM", 143, "SIGINT", 0],
   ] as const)(
-    "%s during npm ci waits for the child, then rolls back exactly once",
-    async (signal, exitCode, repeatedSignal) => {
+    "%s during npm ci waits for the child and rolls back (update exit %i, repeated %s, dependency exit %i)",
+    async (signal, exitCode, repeatedSignal, ciExitCode) => {
       const calls: RecordedCall[] = [];
       const exit = vi.fn();
       const router = new UpdateInterruptionRouter(exit);
@@ -3113,14 +3186,15 @@ describe("rolling back a failed update", () => {
 
       await vi.waitFor(() => expect(ciSignal?.aborted).toBe(true));
       expect(executed(runner)).not.toContain(`git checkout --detach ${previousRef}`);
-      finishCi({ code: 1, stdout: "" });
+      finishCi({ code: ciExitCode, stdout: "" });
       await rejection;
 
       expect(
         executed(runner).filter((line) => line === `git checkout --detach ${previousRef}`),
       ).toHaveLength(1);
-      expect(executed(runner).slice(-3)).toEqual([
+      expect(executed(runner).slice(-4)).toEqual([
         `git checkout --detach ${previousRef}`,
+        "rm -rf node_modules",
         "npm ci",
         "npm run build",
       ]);
@@ -3134,6 +3208,42 @@ describe("rolling back a failed update", () => {
       expect(exit).toHaveBeenCalledExactlyOnceWith(143);
     },
   );
+
+  test("an interrupted dependency tree whose reset fails stops rollback before reinstall or build", async () => {
+    const calls: RecordedCall[] = [];
+    const router = new UpdateInterruptionRouter(vi.fn());
+    const state = fakeApplyState();
+    let ciCalls = 0;
+    const run: CommandRunner = (spec, mode) => {
+      calls.push({ spec, mode });
+      const [operation] = spec.args;
+      if (mode === "capture") {
+        if (operation === "config") return Promise.resolve(managed);
+        if (operation === "status" || operation === "merge-base") return Promise.resolve(clean);
+        if (operation === "ls-remote") return Promise.resolve(tags);
+        if (operation === "show") return Promise.resolve(manifest);
+        if (operation === "rev-parse") return Promise.resolve(head);
+        if (operation === "rev-list") return Promise.resolve(targetSha);
+      }
+      if (spec.command === "npm" && operation === "ci") {
+        ciCalls++;
+        router.dispatch("SIGTERM");
+        return Promise.resolve({ code: 1, stdout: "interrupted" });
+      }
+      if (spec.command === "rm") return Promise.resolve({ code: 1, stdout: "reset refused" });
+      return Promise.resolve(clean);
+    };
+    const runner = { run, calls };
+    await expect(
+      source(makeDeps(runner, { interruptions: router, applyState: state.store })),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("rollback also failed at `rm -rf node_modules`"),
+    });
+    expect(ciCalls).toBe(1);
+    expect(executed(runner)).not.toContain("npm run build");
+    expect(calls.find(({ spec }) => spec.command === "rm")?.spec.cwd).toBe(rootDir);
+    expect(state.writes.map((value) => value.phase)).toEqual(["applying", "rolling-back"]);
+  });
 
   test("a signal during the source health wait rolls the checkout back", async () => {
     const exit = vi.fn();
@@ -4967,6 +5077,8 @@ describe("hand-over paths a single run never had", () => {
         ownVersion?: string;
         prepare?: (lock: unknown) => Promise<void> | void;
         interruptions?: UpdateInterruptionRouter;
+        deps?: Partial<UpdateFlowDeps>;
+        detection?: Parameters<typeof continueOffer>[0]["detection"];
       } = {},
     ) {
       const interruptions =
@@ -4978,6 +5090,7 @@ describe("hand-over paths a single run never had", () => {
         async (_install: unknown, _offer: UpdateContinuation, lock: unknown) => {
           await overrides.prepare?.(lock);
           return makeDeps(fakeRunner([]), {
+            ...overrides.deps,
             currentVersion: "0.4.10",
             interruptions,
             updateLock: lock as UpdateFlowDeps["updateLock"],
@@ -4989,7 +5102,7 @@ describe("hand-over paths a single run never had", () => {
         id: OFFER_ID,
         env: { OMNESIS_UPDATE_LOCK_ID: offering.id },
         ownVersion: overrides.ownVersion ?? "0.5.0",
-        detection: { method: "source", rootDir },
+        detection: overrides.detection ?? { method: "source", rootDir },
         interruptions,
         prepare,
       });
@@ -5010,11 +5123,131 @@ describe("hand-over paths a single run never had", () => {
       expect(() => acquireUpdateLock(configDir, { owner: "second" })).toThrow(/fanning out/);
     });
 
+    test.each(["legacy", "canonical", "current"])(
+      "refreshes the %s source front door before accepting and restarting",
+      async (format) => {
+        const homeDir = join(configDir, "home");
+        const launcher = join(homeDir, ".local/bin/omnesis");
+        const helper = join(homeDir, ".local/lib/omnesis/update-lock.cjs");
+        const expected = sourceRecoveryLauncher(rootDir, configDir, helper);
+        // Reconstruct the previous complete installer-owned format, retaining
+        // its recovery and lock functions rather than just a similar header.
+        const previousCanonical = expected
+          .replace(/# Import the loader in the daemon itself:[\s\S]*?SOURCE_LOADER_URL=.*\n/u, "")
+          .replaceAll('node --import "$SOURCE_LOADER_URL"', '"$SOURCE_ROOT/node_modules/.bin/tsx"')
+          .replaceAll(
+            '[ ! -f "$SOURCE_ROOT/node_modules/tsx/dist/loader.mjs" ]',
+            '[ ! -x "$SOURCE_ROOT/node_modules/.bin/tsx" ]',
+          );
+        const previous =
+          format === "legacy"
+            ? `#!/bin/sh\nexec "${rootDir}/node_modules/.bin/tsx" "${rootDir}/packages/cli/src/index.ts" "$@"\n`
+            : format === "canonical"
+              ? previousCanonical
+              : expected;
+        mkdirSync(dirname(launcher), { recursive: true });
+        writeFileSync(launcher, previous, { mode: 0o755 });
+        writeContinuation(configDir, doc());
+        const events: string[] = [];
+        const refresh = vi.fn((candidate: string) => {
+          expect(readContinuation(configDir)?.state).toBe("offered");
+          expect(() => acquireUpdateLock(configDir, { owner: "concurrent update" })).toThrow(
+            UpdateLockBusyError,
+          );
+          expect(readFileSync(launcher, "utf8")).toBe(previous);
+          prepareSourceRecoveryLauncher(candidate, configDir, homeDir);
+          events.push("refresh");
+        });
+        const restart = vi.fn((component: ServiceComponent) => {
+          expect(readContinuation(configDir)?.state).toBe("accepted");
+          expect(readFileSync(launcher, "utf8")).toBe(expected);
+          events.push(`restart ${component}`);
+          return Promise.resolve();
+        });
+        const { run, prepare } = take({
+          deps: {
+            prepareSourceLauncher: refresh,
+            roles: hostRoles({ gateway: supervised, collector: supervised }),
+            restartService: restart,
+            awaitHealth: vi.fn(() => {
+              events.push("health");
+              return Promise.resolve();
+            }),
+          },
+        });
+        await run;
+        expect(refresh).toHaveBeenCalledExactlyOnceWith(rootDir);
+        expect(events).toEqual(["refresh", "restart gateway", "health", "restart collector"]);
+        expect(captureOwnedSourceLauncher(launcher, rootDir, configDir, homeDir).content).toBe(
+          expected,
+        );
+        expect((await prepare.mock.results[0]!.value).confirm).not.toHaveBeenCalled();
+        offering.setStep("finished source continuation");
+      },
+    );
+
+    test("a failed target launcher refresh refuses acceptance and restarts while returning the lock", async () => {
+      writeContinuation(configDir, doc());
+      const failure = new Error("owned launcher could not be refreshed");
+      const restartService = vi.fn();
+      const refresh = vi.fn(() => {
+        throw failure;
+      });
+      const { run } = take({ deps: { prepareSourceLauncher: refresh, restartService } });
+      await expect(run).rejects.toBe(failure);
+      expect(readContinuation(configDir)?.state).toBe("offered");
+      expect(refresh).toHaveBeenCalledExactlyOnceWith(rootDir);
+      expect(restartService).not.toHaveBeenCalled();
+      offering.setStep("refused target refresh");
+    });
+
+    test("a package continuation never refreshes the source launcher", async () => {
+      writeContinuation(
+        configDir,
+        doc({ subject: { method: "npm-global", target: "0.5.0", previous: "0.4.10" } }),
+      );
+      const refresh = vi.fn();
+      const { run } = take({
+        detection: { method: "npm-global" },
+        deps: { prepareSourceLauncher: refresh },
+      });
+      await run;
+      expect(refresh).not.toHaveBeenCalled();
+      expect(readContinuation(configDir)?.state).toBe("accepted");
+      offering.setStep("finished package continuation");
+    });
+
+    test("a signal during launcher refresh refuses acceptance without restarting", async () => {
+      writeContinuation(configDir, doc());
+      const interruptions = new UpdateInterruptionRouter(() => {
+        throw new Error("unexpected signal exit");
+      });
+      const restartService = vi.fn();
+      const { run } = take({
+        interruptions,
+        deps: {
+          prepareSourceLauncher: () => {
+            interruptions.dispatch("SIGTERM");
+          },
+          restartService,
+        },
+      });
+      await expect(run).rejects.toMatchObject({ exitCode: 143 });
+      expect(readContinuation(configDir)?.state).toBe("offered");
+      expect(restartService).not.toHaveBeenCalled();
+      offering.setStep("refused interrupted refresh");
+    });
+
     test("a refusal leaves the offer open and the lock with the offering process", async () => {
       writeContinuation(configDir, doc());
-      const { run, prepare } = take({ ownVersion: "0.4.10" });
+      const refresh = vi.fn();
+      const { run, prepare } = take({
+        ownVersion: "0.4.10",
+        deps: { prepareSourceLauncher: refresh },
+      });
       await expect(run).rejects.toMatchObject({ exitCode: EXIT_FAILURE });
       expect(prepare).not.toHaveBeenCalled();
+      expect(refresh).not.toHaveBeenCalled();
       expect(readContinuation(configDir)?.state).toBe("offered");
       offering.setStep("finishing here");
     });

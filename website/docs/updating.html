@@ -411,7 +411,16 @@
           On a source install, <code>npm ci</code> installs over the <code>node_modules</code> the
           running release left. If that install fails, the update removes
           <code>node_modules</code> and installs once more before it rolls back, and the rollback's
-          own install is retried the same way.
+          own install is retried the same way. If dependency installation is interrupted, killed, or
+          still fails after its retry, rollback removes the incomplete dependency tree before
+          reinstalling the previous release. If removing that tree fails, recovery stops and reports
+          the failed step.
+        </p>
+        <p>
+          On Intel macOS, dependency installation also verifies the native vector engine and builds
+          it locally when the bundled binary is incompatible. This applies to fresh installations,
+          updates and rollback reinstalls. Keep Xcode Command Line Tools installed; see
+          <a href="/docs/install#requirements">Requirements</a>.
         </p>
 
         <h3 id="update-flags">Options</h3>
