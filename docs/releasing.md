@@ -10,8 +10,8 @@ One command drives a release: `npm run release -- <subcommand>` (§ [The
 release conductor](#the-release-conductor)). It owns everything from the
 changeset to the annotated tag and reads nothing outside the repository.
 Pushing that tag triggers `.github/workflows/release.yml`, which creates the
-GitHub Release and, once publication is armed, publishes the packages and the
-container images (§ [The tag-triggered workflow](#the-tag-triggered-workflow)).
+GitHub Release, publishes the container images and, once npm publication is
+armed, the packages (§ [The tag-triggered workflow](#the-tag-triggered-workflow)).
 
 A release is an annotated `vX.Y.Z` tag on `main`. Both distribution channels
 resolve from it: a source install checks out the tag and builds it, and a
@@ -27,11 +27,13 @@ refuses `--docker --edge`: container installs resolve released images, while an
 ad-hoc commit image is published manually and pinned by its immutable `sha-*`
 tag.
 
-To run an arbitrary commit in Docker, start from a normal Docker install. A
-maintainer with workflow publication permission dispatches
-`.github/workflows/docker.yml` on a branch or tag at that commit with "Also
-publish the built images to GHCR" enabled. Once the images exist, the host pins
-the resulting tag and recreates its services:
+To run an arbitrary commit in Docker, start from a normal Docker install that
+runs the gateway and collector as separate containers. A maintainer with
+workflow publication permission dispatches `.github/workflows/docker-publish.yml`
+with `target_sha` set to that commit's full SHA and `push` ("Publish the built
+images to GHCR") enabled. It publishes the gateway, collector and updater images
+(there is no combined image) tagged `sha-<short-sha>`. Once the images exist,
+the host pins the resulting tag and recreates its services:
 
 ```sh
 sed -i.bak 's/^OMNESIS_IMAGE_TAG=.*/OMNESIS_IMAGE_TAG=sha-0123abc/' ~/.config/omnesis/.env
