@@ -446,6 +446,11 @@ export function createServer(
       role: import("@omnesis/core").CapabilityRole,
       opts?: { force?: boolean },
     ) => Promise<import("@omnesis/core").CapabilityVerdict>;
+    /** Whether an assignment may be written — `PATCH /admin/config` refuses one that may not. */
+    vetAssignment?: (
+      role: import("@omnesis/core").CapabilityRole,
+      value: import("@omnesis/core").AssignmentValue,
+    ) => Promise<{ ok: true } | { ok: false; reason: string }>;
     /** Built-in Codex backend status and device-login hooks, mounted with model routes. */
     getCodexStatus?: () => import("@omnesis/core").CodexBackendStatus;
     refreshCodexStatus?: () => Promise<import("@omnesis/core").CodexBackendStatus>;
@@ -1255,6 +1260,7 @@ export function createServer(
     getTranscriptionVocabularyEnabled: () =>
       opts?.transcriptionVocabularyService?.enabled() ?? false,
     getDiskUsage: opts?.getDiskUsage,
+    vetAssignment: opts?.vetAssignment,
   });
 
   // Model manager + system info routes (admin scope). Registered only
