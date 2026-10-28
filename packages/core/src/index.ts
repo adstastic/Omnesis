@@ -17,6 +17,7 @@ export {
   DISTRUSTED_ROOT_SHA256,
   distrustingNodeOptions,
   isDistrustedRoot,
+  PRELOAD_SOURCE,
   publicRoots,
 } from "./tls-distrust.js";
 

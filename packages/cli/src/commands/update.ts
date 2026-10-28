@@ -313,14 +313,17 @@ export const spawnRunner: CommandRunner = (spec, mode, control) =>
         ]
       : spec.args;
     // npm reaches the registry with its own CA store; keep the distrusted
-    // roots out of it the way this process keeps them out of its own.
-    const env = /^np[mx]$/u.test(basename(spec.command))
-      ? {
-          ...process.env,
-          ...spec.env,
-          NODE_OPTIONS: distrustingNodeOptions(spec.env?.NODE_OPTIONS),
-        }
-      : spec.env && { ...process.env, ...spec.env };
+    // roots out of it the way this process keeps them out of its own. `npm run`
+    // reaches no registry, so a build keeps exactly the NODE_OPTIONS it was
+    // given, as in the installer.
+    const env =
+      /^np[mx]$/u.test(basename(spec.command)) && spec.args[0] !== "run"
+        ? {
+            ...process.env,
+            ...spec.env,
+            NODE_OPTIONS: distrustingNodeOptions(spec.env?.NODE_OPTIONS),
+          }
+        : spec.env && { ...process.env, ...spec.env };
     const child = spawn(command, args, {
       cwd: spec.cwd,
       ...(env ? { env } : {}),

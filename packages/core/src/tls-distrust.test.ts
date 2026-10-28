@@ -3,21 +3,25 @@
 
 import { execFileSync } from "node:child_process";
 import { X509Certificate } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { getCACertificates } from "node:tls";
-import { fileURLToPath } from "node:url";
+import { getCACertificates, setDefaultCACertificates } from "node:tls";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   DISTRUSTED_ROOT_SHA256,
+  distrustCompromisedRoots,
   distrustingNodeOptions,
   isDistrustedRoot,
+  PRELOAD_SOURCE,
   publicRoots,
 } from "./tls-distrust.js";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, "..", "..", "..");
 
 const sha256 = (pem: string) =>
   new X509Certificate(pem).fingerprint256.replaceAll(":", "").toLowerCase();
@@ -26,6 +30,28 @@ const sha256 = (pem: string) =>
 const fingerprintsIn = (path: string) =>
   new Set(readFileSync(join(repoRoot, path), "utf8").match(/\b[0-9a-f]{64}\b/gu));
 
+/**
+ * The emSign roots themselves. Node 24.22.1 and 26.12.1 bundle none of them,
+ * so a test that only reads the bundled store passes there whatever the
+ * filter does; these keep every test meaningful on any Node.
+ */
+const EMSIGN_ROOTS_FILE = join(here, "testdata", "emsign-roots.pem");
+const EMSIGN_ROOTS =
+  readFileSync(EMSIGN_ROOTS_FILE, "utf8").match(
+    /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/gu,
+  ) ?? [];
+
+const scratch: string[] = [];
+afterEach(() => {
+  for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+const scratchDir = () => {
+  const dir = mkdtempSync(join(tmpdir(), "omnesis-tls-distrust-test-"));
+  scratch.push(dir);
+  return dir;
+};
+
+/** A child Node process's distrusted default roots, after `NODE_OPTIONS`. */
 const PRINT_DISTRUSTED_IN_DEFAULT_STORE = `
   const { X509Certificate } = require("node:crypto");
   const distrusted = new Set(${JSON.stringify([...DISTRUSTED_ROOT_SHA256])});
@@ -35,7 +61,47 @@ const PRINT_DISTRUSTED_IN_DEFAULT_STORE = `
   process.stdout.write(JSON.stringify(found));
 `;
 
+/** A `--require` that puts the emSign roots into the child's default store first. */
+function seedEmSignRoots(): string {
+  const seed = join(scratchDir(), "seed.cjs");
+  writeFileSync(
+    seed,
+    `const tls = require("node:tls");
+const pems = require("node:fs").readFileSync(${JSON.stringify(EMSIGN_ROOTS_FILE)}, "utf8")
+  .match(/-----BEGIN CERTIFICATE-----[\\s\\S]+?-----END CERTIFICATE-----/g);
+tls.setDefaultCACertificates([...tls.getCACertificates("default"), ...pems]);
+`,
+  );
+  return `--require=${seed}`;
+}
+
+const distrustedInChild = (nodeOptions: string) =>
+  JSON.parse(
+    execFileSync(process.execPath, ["-e", PRINT_DISTRUSTED_IN_DEFAULT_STORE], {
+      env: { PATH: process.env.PATH, NODE_OPTIONS: nodeOptions },
+      encoding: "utf8",
+    }),
+  ) as string[];
+
+/** The body the installer's `npm_trust_preload` writes. */
+function installerPreload(path: string): string {
+  const installer = readFileSync(join(repoRoot, path), "utf8");
+  const start = installer.indexOf("npm_trust_preload() {\n  cat <<'EOF'\n");
+  expect(start).toBeGreaterThan(0);
+  const body = installer.indexOf("\n", installer.indexOf("<<'EOF'", start)) + 1;
+  return installer.slice(body, installer.indexOf("EOF\n}\n", body));
+}
+
 describe("distrusted roots", () => {
+  it("are the three emSign roots, matched from their PEM encoding", () => {
+    expect(EMSIGN_ROOTS).toHaveLength(3);
+    for (const pem of EMSIGN_ROOTS) {
+      expect(new X509Certificate(pem).subject).toMatch(/CN=emSign (ECC )?Root CA - (G3|C1|C3)/u);
+      expect(isDistrustedRoot(pem)).toBe(true);
+    }
+    expect(new Set(EMSIGN_ROOTS.map(sha256))).toEqual(new Set(DISTRUSTED_ROOT_SHA256));
+  });
+
   it("are the emSign roots wherever Node still bundles them", () => {
     for (const pem of getCACertificates("bundled").filter(isDistrustedRoot)) {
       expect(new X509Certificate(pem).subject).toMatch(/CN=emSign (ECC )?Root CA - (G3|C1|C3)/u);
@@ -48,6 +114,17 @@ describe("distrusted roots", () => {
         .map(sha256)
         .filter((h) => DISTRUSTED_ROOT_SHA256.has(h)),
     ).toEqual([]);
+  });
+
+  it("are removed from a default store that holds them, and nothing else is", () => {
+    const original = getCACertificates("default");
+    try {
+      setDefaultCACertificates([...original, ...EMSIGN_ROOTS]);
+      distrustCompromisedRoots();
+      expect(getCACertificates("default").map(sha256)).toEqual(original.map(sha256));
+    } finally {
+      setDefaultCACertificates(original);
+    }
   });
 
   it("are left out of the public roots, and nothing else is", () => {
@@ -69,21 +146,60 @@ describe("distrusted roots", () => {
       expect(fingerprintsIn(path)).toEqual(new Set(DISTRUSTED_ROOT_SHA256));
     },
   );
+
+  it("leave every process able to load on a Node without setDefaultCACertificates", () => {
+    // Node before 24.5, which the published engines range admits: a hook
+    // serves node:tls without the export, so a static import of it fails
+    // to link exactly as it does there.
+    const shim = join(scratchDir(), "old-node.mjs");
+    writeFileSync(
+      shim,
+      `import { registerHooks } from "node:module";
+registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier === "node:tls" || specifier === "tls") return { url: "old-node:tls", shortCircuit: true };
+    return next(specifier, context);
+  },
+  load(url, context, next) {
+    if (url !== "old-node:tls") return next(url, context);
+    const names = Object.keys(process.getBuiltinModule("node:tls"))
+      .filter((name) => name !== "setDefaultCACertificates");
+    const source = [
+      "const tls = { ...process.getBuiltinModule('node:tls') };",
+      "delete tls.setDefaultCACertificates;",
+      "export default tls;",
+      ...names.map((name) => "export const " + name + " = tls." + name + ";"),
+    ].join("\\n");
+    return { format: "module", source, shortCircuit: true };
+  },
+});
+`,
+    );
+    const moduleUrl = pathToFileURL(join(here, "tls-distrust.ts")).href;
+    const output = execFileSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--import",
+        shim,
+        "--input-type=module",
+        "-e",
+        `const m = await import(${JSON.stringify(moduleUrl)});
+process.stdout.write(String(m.publicRoots().some(m.isDistrustedRoot)));`,
+      ],
+      { cwd: repoRoot, encoding: "utf8" },
+    );
+    expect(output).toBe("false");
+  });
 });
 
 describe("distrustingNodeOptions", () => {
   it("keeps the distrusted roots out of a child Node process", () => {
-    const run = (env: NodeJS.ProcessEnv) =>
-      JSON.parse(
-        execFileSync(process.execPath, ["-e", PRINT_DISTRUSTED_IN_DEFAULT_STORE], {
-          env: { PATH: process.env.PATH, ...env },
-          encoding: "utf8",
-        }),
-      ) as string[];
-    // The control: without the preload the child trusts whatever Node bundles.
-    const bundledDistrusted = getCACertificates("bundled").filter(isDistrustedRoot).length;
-    expect(run({})).toHaveLength(bundledDistrusted);
-    expect(run({ NODE_OPTIONS: distrustingNodeOptions("") })).toEqual([]);
+    const seed = seedEmSignRoots();
+    // The control: without the preload the child trusts the roots it was given.
+    expect(distrustedInChild(seed)).toHaveLength(3);
+    expect(distrustedInChild(distrustingNodeOptions(seed))).toEqual([]);
   });
 
   it("appends to options the caller already set", () => {
@@ -93,4 +209,41 @@ describe("distrustingNodeOptions", () => {
     );
     expect(distrustingNodeOptions(undefined)).toMatch(/--import=file:/u);
   });
+
+  it("writes the preload again when a temp cleaner removed it", () => {
+    const preloadOf = (options: string) =>
+      fileURLToPath(/--import=(\S+)$/u.exec(options)?.[1] ?? "");
+    const first = preloadOf(distrustingNodeOptions(""));
+    rmSync(dirname(first), { recursive: true, force: true });
+    const second = preloadOf(distrustingNodeOptions(""));
+    expect(existsSync(second)).toBe(true);
+    expect(
+      distrustedInChild(`${seedEmSignRoots()} --import=${pathToFileURL(second).href}`),
+    ).toEqual([]);
+  });
+
+  it("removes the preload when the process exits", () => {
+    const moduleUrl = pathToFileURL(join(here, "tls-distrust.ts")).href;
+    const preload = execFileSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "-e",
+        `const m = await import(${JSON.stringify(moduleUrl)});
+process.stdout.write(/--import=(\\S+)$/.exec(m.distrustingNodeOptions(""))[1]);`,
+      ],
+      { cwd: repoRoot, encoding: "utf8" },
+    );
+    expect(preload).toMatch(/^file:.*\/distrust-roots\.mjs$/u);
+    expect(existsSync(dirname(fileURLToPath(preload)))).toBe(false);
+  });
+
+  it.each(["scripts/install.sh", "website/install.sh"])(
+    "is the preload %s writes, byte for byte",
+    (path) => {
+      expect(installerPreload(path)).toBe(PRELOAD_SOURCE);
+    },
+  );
 });

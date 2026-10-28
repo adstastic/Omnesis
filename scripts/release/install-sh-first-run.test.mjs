@@ -21,14 +21,16 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { userInfo } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
@@ -1869,17 +1871,28 @@ fs.writeFileSync(path.join(dir, "..", "..", "installVersion"), "11\\n");
   });
 
   test("npm ci runs with the trust preload, which the installer removes afterwards", () => {
-    const run = runInstaller("npm-trust-preload", ["--no-tls", "--embedder", EMBED_IDS[0]], {
-      OMNESIS_TEST_KEYRING: "ready",
-    });
-    expect(run.status).toBe(0);
-    const preloads = readFileSync(join(run.home, "cli-calls.log.npm-ci-preload"), "utf8")
-      .trim()
-      .split("\n");
-    expect(preloads.length).toBeGreaterThan(0);
-    for (const preload of preloads) {
-      expect(preload).toMatch(/\/distrust-roots\.mjs$/u);
-      expect(existsSync(preload)).toBe(false);
+    // A preload directory named in the environment is not the installer's:
+    // it must neither import a file planted there nor delete the directory.
+    const planted = mkdtempSync(join(tmpdir(), "omnesis-planted-trust-"));
+    try {
+      writeFileSync(join(planted, "distrust-roots.mjs"), "process.exit(97);\n");
+      const run = runInstaller("npm-trust-preload", ["--no-tls", "--embedder", EMBED_IDS[0]], {
+        OMNESIS_TEST_KEYRING: "ready",
+        NPM_TRUST_DIR: planted,
+      });
+      expect(run.status).toBe(0);
+      const preloads = readFileSync(join(run.home, "cli-calls.log.npm-ci-preload"), "utf8")
+        .trim()
+        .split("\n");
+      expect(preloads.length).toBeGreaterThan(0);
+      for (const preload of preloads) {
+        expect(preload).toMatch(/\/distrust-roots\.mjs$/u);
+        expect(preload.startsWith(planted)).toBe(false);
+        expect(existsSync(preload)).toBe(false);
+      }
+      expect(existsSync(join(planted, "distrust-roots.mjs"))).toBe(true);
+    } finally {
+      rmSync(planted, { recursive: true, force: true });
     }
   });
 

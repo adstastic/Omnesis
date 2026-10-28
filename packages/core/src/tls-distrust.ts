@@ -19,10 +19,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getCACertificates, setDefaultCACertificates } from "node:tls";
+import tls from "node:tls";
 import { pathToFileURL } from "node:url";
 
 /** SHA-256 of each distrusted root's DER encoding, lowercase hex. */
@@ -42,25 +42,34 @@ export function isDistrustedRoot(pem: string): boolean {
 
 /** Node's bundled public roots without the distrusted ones. */
 export function publicRoots(): string[] {
-  return getCACertificates("bundled").filter((pem) => !isDistrustedRoot(pem));
+  return tls.getCACertificates("bundled").filter((pem) => !isDistrustedRoot(pem));
 }
 
-/** Drop the distrusted roots from this thread's default CA store. Idempotent. */
+/**
+ * Drop the distrusted roots from this thread's default CA store. Idempotent.
+ * A no-op on a Node without `setDefaultCACertificates` (before 24.5), which
+ * the published `engines` range still admits: a static import of it would
+ * stop every Omnesis process from loading there.
+ */
 export function distrustCompromisedRoots(): void {
-  const current = getCACertificates("default");
+  if (typeof tls.setDefaultCACertificates !== "function") return;
+  const current = tls.getCACertificates("default");
   const kept = current.filter((pem) => !isDistrustedRoot(pem));
-  if (kept.length !== current.length) setDefaultCACertificates(kept);
+  if (kept.length !== current.length) tls.setDefaultCACertificates(kept);
 }
 
 /**
  * A child Node process — npm above all — builds its own CA store from the
  * same bundled set. This preload drops the same roots there. It filters the
  * default store only, so a `ca`/`cafile` the user configured for npm still
- * wins, and it is a no-op on a Node without `setDefaultCACertificates`.
+ * wins, and it is a no-op on a Node without `setDefaultCACertificates`. The
+ * installer carries a copy (`npm_trust_preload`), which a test holds to this.
  */
-const PRELOAD_SOURCE = `import { createHash } from "node:crypto";
+export const PRELOAD_SOURCE = `import { createHash } from "node:crypto";
 import tls from "node:tls";
-const distrusted = new Set(${JSON.stringify([...DISTRUSTED_ROOT_SHA256])});
+const distrusted = new Set([
+${[...DISTRUSTED_ROOT_SHA256].map((hex) => `  "${hex}",`).join("\n")}
+]);
 const keep = (pem) => !distrusted.has(createHash("sha256").update(Buffer.from(pem.replace(/-----(?:BEGIN|END) CERTIFICATE-----|\\s/gu, ""), "base64")).digest("hex"));
 if (typeof tls.setDefaultCACertificates === "function") {
   const current = tls.getCACertificates("default");
@@ -68,23 +77,31 @@ if (typeof tls.setDefaultCACertificates === "function") {
 }
 `;
 
-let preloadUrl: string | undefined;
+let preload: { dir: string; file: string } | undefined;
+
+function removePreload(): void {
+  if (preload) rmSync(preload.dir, { recursive: true, force: true });
+}
 
 /**
  * `NODE_OPTIONS` for a child Node process that should not trust the
  * distrusted roots: `current` with the preload appended. The preload is
- * written once per process into a private temporary directory, so no other
- * user can swap what the child imports.
+ * written into a private temporary directory, so no other user can swap what
+ * the child imports, and removed when this process exits. It is written again
+ * if a temp cleaner removed it under a long-running process.
  */
 export function distrustingNodeOptions(
   current: string | undefined = process.env.NODE_OPTIONS,
 ): string {
-  if (preloadUrl === undefined) {
-    const file = join(mkdtempSync(join(tmpdir(), "omnesis-tls-")), "distrust-roots.mjs");
+  if (preload === undefined || !existsSync(preload.file)) {
+    const dir = mkdtempSync(join(tmpdir(), "omnesis-tls-"));
+    const file = join(dir, "distrust-roots.mjs");
     writeFileSync(file, PRELOAD_SOURCE, { mode: 0o600 });
-    preloadUrl = pathToFileURL(file).href;
+    if (preload === undefined) process.once("exit", () => removePreload());
+    else removePreload();
+    preload = { dir, file };
   }
-  const flag = `--import=${preloadUrl}`;
+  const flag = `--import=${pathToFileURL(preload.file).href}`;
   return current?.trim() ? `${current} ${flag}` : flag;
 }
 

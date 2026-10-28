@@ -11,7 +11,8 @@ import { execFileSync } from "node:child_process";
 import { X509Certificate } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   connect as tlsConnect,
   createServer,
@@ -431,5 +432,23 @@ describe("the public roots system trust verifies against", () => {
     expect(roots).toEqual(
       getCACertificates("bundled").filter((pem) => !emSign.test(new X509Certificate(pem).subject)),
     );
+  });
+});
+
+describe("the public roots, where Node still bundles the emSign roots", () => {
+  // Node 24.22.1 and 26.12.1 bundle none of them, so the test above passes
+  // there whatever the filter does; core's fixture of the roots keeps this one
+  // meaningful on any Node.
+  const emSignRoots =
+    readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../core/src/testdata/emsign-roots.pem"),
+      "utf8",
+    ).match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/gu) ?? [];
+
+  test("leave out exactly the emSign roots", () => {
+    expect(emSignRoots).toHaveLength(3);
+    const bundled = getCACertificates("bundled");
+    expect(publicRoots([...bundled, ...emSignRoots])).toEqual(publicRoots(bundled));
+    expect(publicRoots(emSignRoots)).toEqual([]);
   });
 });
