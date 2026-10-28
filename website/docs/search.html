@@ -263,9 +263,13 @@
         <p>
           The semantic lane needs an embedder assigned (see
           <a href="/docs/operating#models">Operating → Models</a>) and chunks that have already been
-          embedded. Until both hold, queries still return: keyword matching alone carries them, and
-          meaning-aware ranking joins in for each document as its vectors land. There is nothing to
-          switch on; the pipeline uses whatever signals exist at query time.
+          embedded. Documents are indexed for keyword search even without an embedding model. Until
+          both hold, keyword matching alone carries queries, and meaning-aware ranking joins in for
+          each document as its vectors land. There is nothing to switch on; the pipeline uses
+          whatever signals exist at query time. When embeddings become available after keyword-only
+          indexing, vectors are rebuilt for the retained corpus while keyword results remain
+          available. Search responses report the active embedding model as assignments change,
+          without requiring a gateway restart.
         </p>
         <p>
           A query made only of filters, with no free text (<code>from:maya type:email</code>), skips

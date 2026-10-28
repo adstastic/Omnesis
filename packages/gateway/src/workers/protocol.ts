@@ -67,6 +67,7 @@ export function resolveIndexerCutoffMaxAge(
 
 export type IndexerInit = {
   type: "init";
+  lexicalOnly?: boolean;
   modelPath: string;
   /**
    * Canonical embed-model identity used to detect a swap that bypassed the

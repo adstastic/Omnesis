@@ -17,9 +17,9 @@ import {
   upsertChunks,
 } from "./db.js";
 import { GraphKeeper, planGraphAdmission } from "./graph-keeper.js";
-import type { SemanticSearchStatus } from "@omnesis/source-sdk";
 import { UsearchWriteHandle } from "./usearch-index.js";
 import { readSidecarFingerprint } from "./usearch-sidecar-crypto.js";
+import type { SemanticSearchStatus } from "@omnesis/source-sdk";
 import type Database from "better-sqlite3";
 
 const MIB = 1024 * 1024;

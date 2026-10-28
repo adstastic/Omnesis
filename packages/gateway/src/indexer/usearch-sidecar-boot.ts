@@ -3,6 +3,7 @@
 
 import {
   getIndexEmbedModel,
+  hasLexicalWrites,
   getVectorChangesPrunedThrough,
   getVectorWriteSeq,
   purgeUsearchSidecars,
@@ -36,6 +37,11 @@ export function prepareEncryptedGraphForBoot(
   purgeUsearchSidecars(configDir);
   purgeSidecarTemps(configDir);
   if (!indexDbKey) return { restored: false, reason: "no index-db key" };
+  // A pending invalidation makes even a cryptographically valid old graph obsolete.
+  // Keep the encrypted copy until replacement-model warmup succeeds.
+  if (hasLexicalWrites(indexDb)) {
+    return { restored: false, reason: "semantic index invalidation pending" };
+  }
   const activeTarget = resolveActiveUsearchTarget(indexDb, configDir);
   const restore = restoreActiveSidecar({
     encPath: `${activeTarget.path}.enc`,

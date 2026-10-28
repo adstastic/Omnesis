@@ -45,7 +45,12 @@ export interface IndexStatsDeps {
   config?: OmnesisConfig;
   indexerModel?: IndexerModelInfo;
   getIndexRate?: () => number | null;
-  indexerReadiness?: () => { status: string; message?: string; reason?: string };
+  indexerReadiness?: () => {
+    status: string;
+    message?: string;
+    reason?: string;
+    keywordIndexingActive?: boolean;
+  };
   /** The HNSW graph's state against the memory budget; null before the worker reports. */
   getSemanticSearch?: () => SemanticSearchStatus | null;
 }
@@ -66,6 +71,7 @@ interface IndexSourceStats {
 
 export interface IndexStatsPayload {
   enabled: boolean;
+  keywordIndexingActive?: boolean;
   state: "model-missing" | "disabled" | "spawning" | "running";
   model?: IndexerModelInfo | null;
   totalIndexed?: number;
@@ -93,12 +99,20 @@ export function computeIndexStats(deps: IndexStatsDeps): IndexStatsPayload {
   const { db, indexDb, configStore, config, indexerModel, indexerReadiness, getIndexRate } = deps;
   const semanticSearch = deps.getSemanticSearch?.() ?? null;
 
-  const model = indexerModel;
+  const model = indexerModel?.disabled ? null : indexerModel;
+  const keywordIndexingActive = indexerReadiness?.().keywordIndexingActive === true;
   if (model && !model.present) {
     return {
       enabled: false,
       state: "model-missing",
       model,
+      ...(keywordIndexingActive && indexDb
+        ? {
+            keywordIndexingActive: true,
+            totalIndexed: getIndexedDocumentCount(indexDb),
+            totalChunks: getChunkCount(indexDb),
+          }
+        : {}),
     };
   }
   if (!indexDb) {
@@ -244,7 +258,8 @@ export function computeIndexStats(deps: IndexStatsDeps): IndexStatsPayload {
   return {
     enabled: true,
     state: "running",
-    model: indexerModel ?? null,
+    ...(keywordIndexingActive ? { keywordIndexingActive: true } : {}),
+    model: model ?? null,
     totalIndexed,
     totalIndexErrors,
     percentIndexed: overall.percent,

@@ -36,12 +36,12 @@
  * identical edge set (no duplicate/destroyed edges) — the idempotence oracle.
  */
 
+import { analyticsRowKey } from "@omnesis/core";
+import { markLinkStatsDirty } from "../../data/DirtyMarks.js";
 import {
   sealConversationEvidence,
   type ConversationEvidenceProjection,
 } from "./evidence-projection.js";
-import { analyticsRowKey } from "@omnesis/core";
-import { markLinkStatsDirty } from "../../data/DirtyMarks.js";
 import type { LinkType } from "@omnesis/core";
 import type Database from "better-sqlite3";
 

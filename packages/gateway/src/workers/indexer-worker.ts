@@ -29,10 +29,11 @@ import { DocumentChunker } from "../indexer/chunker.js";
 import { DirectDocumentSource } from "../indexer/direct-document-source.js";
 import {
   openIndexDb,
+  hasLexicalWrites,
+  setLexicalWrites,
   refreshIndexStats,
   getIndexEmbedModel,
   setIndexEmbedModel,
-  wipeAndRecreateVectorIndex,
   getWatermark,
   setWatermark,
   getIndexedDocumentCount,
@@ -49,6 +50,7 @@ import {
   getChunkCount,
   getUsearchBackfillCursor,
 } from "../indexer/db.js";
+import { invalidateSemanticIndex } from "../indexer/invalidate-semantic-index.js";
 import { GraphKeeper, planGraphAdmission } from "../indexer/graph-keeper.js";
 import { memoryHeadroom } from "../memory-budget.js";
 import { openEncryptedSqlite } from "../sqlite-encryption.js";
@@ -165,7 +167,7 @@ const rateHistory: IndexRateSample[] = [];
 
 type StartupIndexResources = {
   indexDb: Db;
-  usearchHandle: import("../indexer/usearch-index.js").UsearchWriteHandle;
+  usearchHandle: import("../indexer/usearch-index.js").UsearchWriteHandle | undefined;
 };
 
 type DeferredSourceDelete = {
@@ -209,7 +211,7 @@ function recordRateSample(indexDb: Db): number | undefined {
 }
 
 let state: {
-  embedder: import("../indexer/types.js").Embedder;
+  embedder: import("../indexer/types.js").Embedder | null;
   indexer: Indexer;
   gatewayDb: Db;
   indexDb: Db;
@@ -270,7 +272,7 @@ let state: {
    * disposed and a fresh one spawns on the new active generation).
    */
   paused: boolean;
-  usearchHandle: import("../indexer/usearch-index.js").UsearchWriteHandle;
+  usearchHandle: import("../indexer/usearch-index.js").UsearchWriteHandle | undefined;
   /** index.db path + low-disk floor (MB) for the per-cycle write guard. */
   indexDbPath: string;
   minFreeDiskMb: number;
@@ -345,7 +347,7 @@ function drainPendingWake(): void {
 function trySaveUsearchGraph(context: string): string | null {
   if (!state) return "indexer state unavailable";
   try {
-    state.usearchHandle.save();
+    state.usearchHandle?.save();
     return null;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -356,7 +358,12 @@ function trySaveUsearchGraph(context: string): string | null {
 
 /**
  * Re-apply the deletes that landed while an exclusive job was writing, and
- * persist the result.
+ * persist the result. Source/document journals protect SQL against stale
+ * in-flight writes; once that owner drains and SQL is clean, their job is done.
+ * A lexical worker has no graph to publish: its independent vector-delete
+ * journal remains durable until a semantic owner actually removes and saves
+ * those keys. Keeping SQL-clean document entries here would starve later IDs
+ * behind the bounded queue prefix forever.
  *
  * The delete itself already ran and already answered its caller; this is the
  * pass that removes anything the job wrote for those documents afterwards.
@@ -385,7 +392,7 @@ function drainPendingSourcePurges(): string | null {
     return message;
   }
   try {
-    state.usearchHandle.save();
+    state.usearchHandle?.save();
     refreshIndexStats(state.indexDb);
     completeSourceIndexPurges(state.indexDb, pending);
     state.pendingSourcePurges.clear();
@@ -400,8 +407,10 @@ function drainPendingSourcePurges(): string | null {
 
 /**
  * Re-apply one bounded batch per retained document after an exclusive index
- * job. The durable row stays until the authoritative source document is gone,
- * every chunk/summary row is gone, and the HNSW deletion is published.
+ * job. The SQL re-apply row stays until the authoritative source document and
+ * every chunk/summary row are gone, with no in-flight write left to restore them.
+ * Semantic owners also save the graph before completing it; lexical owners
+ * leave graph publication to the independent pending_vector_deletes journal.
  */
 function drainPendingDocumentPurges(): string | null {
   if (!state) return null;
@@ -428,7 +437,7 @@ function drainPendingDocumentPurges(): string | null {
       state.usearchHandle,
       PENDING_VECTOR_DELETE_BATCH,
     );
-    state.usearchHandle.save();
+    state.usearchHandle?.save();
     refreshIndexStats(state.indexDb);
     completePendingVectorDeletes(state.indexDb, preparedVectorDeletes);
     completeDocumentIndexPurges(state.indexDb, completed);
@@ -454,13 +463,17 @@ function persistGraphAfterSourcePurges(
   const purgeError = drainPendingSourcePurges();
   if (purgeError) return purgeError;
   const saveError = trySaveUsearchGraph(context);
-  if (!saveError) completePendingVectorDeletes(state!.indexDb, preparedVectorDeletes);
+  if (!saveError && state!.usearchHandle && !state!.usearchHandle.isDetached) {
+    completePendingVectorDeletes(state!.indexDb, preparedVectorDeletes);
+  }
   return saveError;
 }
 
 /**
  * Finish all durable delete residue while the worker is starting, before the
- * model warmup/readiness boundary. This runs without `state` because the graph
+ * model warmup/readiness boundary. SQL re-apply entries can complete without
+ * a graph; pending_vector_deletes is never completed without an actual save.
+ * This runs without `state` because the graph
  * and index DB become available before the embedder/indexer do.
  */
 function publishStartupPurges(resources: StartupIndexResources): void {
@@ -503,7 +516,7 @@ function publishStartupPurges(resources: StartupIndexResources): void {
     return;
 
   try {
-    usearchHandle.save();
+    usearchHandle?.save();
     refreshIndexStats(indexDb);
     completePendingVectorDeletes(indexDb, preparedVectorDeletes);
     completeSourceIndexPurges(indexDb, sourceIds);
@@ -581,18 +594,24 @@ async function handleInit(init: IndexerInit): Promise<void> {
     // missing). On mismatch, wipe + rebuild before any cycle runs.
     const stamped = getIndexEmbedModel(indexDb);
     let warmedUp = false;
-    if (stamped === null) {
+    if (init.lexicalOnly) {
+      setLexicalWrites(indexDb, true);
+    } else if (stamped === null && !hasLexicalWrites(indexDb)) {
       log(
         "info",
         "indexer-worker",
         `index_meta empty — stamping model=${init.modelName} dim=${init.embedDim} (existing embeddings assumed to match)`,
       );
       setIndexEmbedModel(indexDb, init.modelName, init.embedDim);
-    } else if (stamped.name !== init.modelName || stamped.dim !== init.embedDim) {
+    } else if (
+      hasLexicalWrites(indexDb) ||
+      stamped?.name !== init.modelName ||
+      stamped?.dim !== init.embedDim
+    ) {
       log(
         "warn",
         "indexer-worker",
-        `embedding model mismatch: stamped=${stamped.name}/${stamped.dim} live=${init.modelName}/${init.embedDim} — wiping vector index for re-embed`,
+        `embedding model mismatch: stamped=${stamped?.name}/${stamped?.dim} live=${init.modelName}/${init.embedDim} — wiping vector index for re-embed`,
       );
       // Prove the replacement embedder can embed BEFORE discarding the vectors
       // the previous one produced. The warm-up is not retried and a failure is
@@ -605,55 +624,61 @@ async function handleInit(init: IndexerInit): Promise<void> {
       await warmupEmbedder.embed(["warmup"]);
       post({ type: "bootProgress", stage: "warmup", progress: 1 });
       warmedUp = true;
-      wipeAndRecreateVectorIndex(indexDb, init.embedDim, init.modelName);
+      invalidateSemanticIndex(indexDb, init.usearchIndexPath, init.embedDim, init.modelName);
     }
 
     // HNSW index: hold the graph in memory only if it fits the budget, then
     // bring it level with index.db (see GraphKeeper). A graph that does not
     // fit is left on disk untouched and search stays keyword-only.
-    const { UsearchWriteHandle } = await import("../indexer/usearch-index.js");
-    const graphFileExisted = existsSync(init.usearchIndexPath);
-    const admission = init.memoryBudget
-      ? planGraphAdmission({
-          vectors: getChunkCount(indexDb),
-          dim: init.embedDim,
-          budget: init.memoryBudget,
-          headroom: memoryHeadroom(init.memoryBudget),
-          loading: graphFileExisted && getUsearchBackfillCursor(indexDb) === null,
-        })
-      : ({ admitted: true } as const);
-    const usearchHandle = new UsearchWriteHandle(init.usearchIndexPath, init.embedDim, {
-      detached: !admission.admitted,
-    });
-    const keeper = new GraphKeeper({
-      indexDb,
-      handle: usearchHandle,
-      graphPath: init.usearchIndexPath,
-      graphFileExisted,
-      indexDbKey: init.indexDbKeyHex ? Buffer.from(init.indexDbKeyHex, "hex") : null,
-      budget: init.memoryBudget ?? null,
-      pageSize: init.usearchBackfillPageSize,
-      checkpointIntervalMs: init.usearchCheckpointIntervalMs,
-      onProgress: (fraction) =>
-        post({ type: "bootProgress", stage: "hnsw-backfill", progress: fraction }),
-      onState: (graph) => post({ type: "vectorIndex", ...graph }),
-      log: (level, message) => log(level, "indexer-worker", message),
-    });
-    graphKeeper = keeper;
-    if (!admission.admitted) {
-      log(
-        "warn",
-        "indexer-worker",
-        `semantic search degraded, keyword search only: ${admission.reason}`,
-      );
-      post({ type: "vectorIndex", state: "degraded", reason: admission.reason });
+    let usearchHandle: import("../indexer/usearch-index.js").UsearchWriteHandle | undefined;
+    let keeper: GraphKeeper | undefined;
+    if (!init.lexicalOnly) {
+      const { UsearchWriteHandle } = await import("../indexer/usearch-index.js");
+      const graphFileExisted = existsSync(init.usearchIndexPath);
+      const admission = init.memoryBudget
+        ? planGraphAdmission({
+            vectors: getChunkCount(indexDb),
+            dim: init.embedDim,
+            budget: init.memoryBudget,
+            headroom: memoryHeadroom(init.memoryBudget),
+            loading: graphFileExisted && getUsearchBackfillCursor(indexDb) === null,
+          })
+        : ({ admitted: true } as const);
+      usearchHandle = new UsearchWriteHandle(init.usearchIndexPath, init.embedDim, {
+        detached: !admission.admitted,
+      });
+      keeper = new GraphKeeper({
+        indexDb,
+        handle: usearchHandle,
+        graphPath: init.usearchIndexPath,
+        graphFileExisted,
+        indexDbKey: init.indexDbKeyHex ? Buffer.from(init.indexDbKeyHex, "hex") : null,
+        budget: init.memoryBudget ?? null,
+        pageSize: init.usearchBackfillPageSize,
+        checkpointIntervalMs: init.usearchCheckpointIntervalMs,
+        onProgress: (fraction) =>
+          post({ type: "bootProgress", stage: "hnsw-backfill", progress: fraction }),
+        onState: (graph) => post({ type: "vectorIndex", ...graph }),
+        log: (level, message) => log(level, "indexer-worker", message),
+      });
+      graphKeeper = keeper;
+      if (!admission.admitted) {
+        log(
+          "warn",
+          "indexer-worker",
+          `semantic search degraded, keyword search only: ${admission.reason}`,
+        );
+        post({ type: "vectorIndex", state: "degraded", reason: admission.reason });
+      }
     }
     startupIndexResources = { indexDb, usearchHandle };
     flushDeferredSourceDeletes();
     flushDeferredDocumentDeletes();
     post({ type: "bootProgress", stage: "hnsw-backfill", progress: 0 });
-    await keeper.open();
-    keeper.startGuard(GRAPH_GUARD_INTERVAL_MS);
+    if (keeper) {
+      await keeper.open();
+      keeper.startGuard(GRAPH_GUARD_INTERVAL_MS);
+    }
 
     // Finish both source-wide and standalone vector-delete residue before
     // model warmup/readiness, then serve any delete messages that arrived while
@@ -664,7 +689,7 @@ async function handleInit(init: IndexerInit): Promise<void> {
 
     const source = new DirectDocumentSource(gatewayDb);
     const chunker = new DocumentChunker(init.chunkerChunkSize, init.chunkerOverlap);
-    const embedder = warmupEmbedder ?? (await buildEmbedder(init));
+    const embedder = init.lexicalOnly ? null : (warmupEmbedder ?? (await buildEmbedder(init)));
     currentCutoffs = init.cutoffs;
     const indexer = new Indexer(indexDb, source, chunker, embedder, {
       getCutoff: (doc) => resolveCutoff(doc.sourceId),
@@ -727,7 +752,7 @@ async function handleInit(init: IndexerInit): Promise<void> {
     // Warm-up embed so the model is fully loaded before we post ready.
     // The embedder applies the configured document-side prefix internally.
     // Skipped when the model-mismatch branch above already paid for it.
-    if (!warmedUp) {
+    if (embedder && !warmedUp) {
       post({ type: "bootProgress", stage: "warmup", progress: 0 });
       await embedder.embed(["warmup"]);
       post({ type: "bootProgress", stage: "warmup", progress: 1 });
@@ -1252,7 +1277,7 @@ async function handleEmbedQuery(id: number, text: string, sentAtMs: number): Pro
   //     Metal/CPU work.
   const recvAtMs = Date.now();
   const ipcInMs = recvAtMs - sentAtMs;
-  if (!state) {
+  if (!state?.embedder) {
     post({ type: "embedQueryError", id, error: "embedder not ready" });
     return;
   }
@@ -1424,7 +1449,7 @@ function handleDeleteDocumentIndexBatch(
         resources.usearchHandle,
         PENDING_VECTOR_DELETE_BATCH,
       );
-      resources.usearchHandle.save();
+      resources.usearchHandle?.save();
       refreshIndexStats(resources.indexDb);
       completePendingVectorDeletes(resources.indexDb, preparedVectorDeletes);
       completeDocumentIndexPurges(resources.indexDb, [documentId]);
@@ -1481,7 +1506,7 @@ async function handleShutdown(): Promise<void> {
   }
 
   try {
-    await state.embedder.dispose();
+    await state.embedder?.dispose();
   } catch {
     /* best-effort */
   }

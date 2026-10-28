@@ -6,8 +6,8 @@
  * Rendered speaker labels are presentation, never authority: an assistant can
  * quote or reproduce those labels in its own answer. */
 
-import { conversationEvidenceStart } from "./render.js";
 import { containsNormalized } from "../../brain/quote-match.js";
+import { conversationEvidenceStart } from "./render.js";
 import { OMNESIS_CHAT_PROVIDER_ID, OMNESIS_CHAT_SOURCE_ID } from "./ids.js";
 import { buildDocumentInput, type ConversationUpserter } from "./upsert.js";
 import type { ConversationRecord } from "../../agent/conversation-store.js";

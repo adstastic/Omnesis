@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Adrien Conrath
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
@@ -828,6 +828,51 @@ describe("chunks", () => {
       expect(listPendingDocumentIndexPurges(db, { sourceDeletedOnly: true })).toEqual([
         { documentId: "doc-c", sourceDeleted: true },
       ]);
+    });
+
+    test.each([
+      ["source", "detached"],
+      ["document", "detached"],
+      ["batch", "detached"],
+      ["source", "released"],
+      ["document", "released"],
+      ["batch", "released"],
+    ] as const)("%s deletion retains publication obligations with a %s graph", (deletion, mode) => {
+      seedGmailChunk();
+      const rowid = gmailRowid();
+      const dir = mkdtempSync(join(tmpdir(), "omnesis-detached-delete-"));
+      const path = join(dir, "index.usearch");
+      let handle = new UsearchWriteHandle(path, EMBEDDING_DIM);
+      try {
+        handle.add(BigInt(rowid), makeEmbedding(1));
+        handle.save();
+        const persisted = readFileSync(path);
+        if (mode === "detached") {
+          handle.close();
+          handle = new UsearchWriteHandle(path, EMBEDDING_DIM, { detached: true });
+        } else {
+          handle.release();
+        }
+        expect(handle.isDetached).toBe(true);
+        if (deletion === "source")
+          deleteIndexBySource(db, "gmail:u@example.com", { usearch: handle });
+        else if (deletion === "document") deleteChunksByDocument(db, "doc-a", { usearch: handle });
+        else
+          expect(
+            deleteChunksByDocumentBatch(db, "doc-a", 1, true, { usearch: handle }).complete,
+          ).toBe(true);
+        expect(getChunkCount(db)).toBe(0);
+        expect(pendingRowids()).toEqual([rowid]);
+        const prepared = preparePendingVectorDeletes(db, handle);
+        expect(prepared).toEqual([]);
+        handle.save();
+        completePendingVectorDeletes(db, prepared);
+        expect(pendingRowids()).toEqual([rowid]);
+        expect(readFileSync(path)).toEqual(persisted);
+      } finally {
+        handle.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     test("vector deletes remain journaled until graph publication completes", () => {

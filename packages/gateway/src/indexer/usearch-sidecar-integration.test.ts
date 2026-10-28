@@ -17,6 +17,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { UsearchWriteHandle, UsearchReadHandle } from "./usearch-index.js";
 import {
   EMBEDDING_DIM,
+  setIndexEmbedModel,
+  setLexicalWrites,
+  hasLexicalWrites,
   createIndexDatabase,
   upsertChunks,
   getVectorWriteSeq,
@@ -31,6 +34,7 @@ import {
   restoreActiveSidecar,
   readSidecarFingerprint,
 } from "./usearch-sidecar-crypto.js";
+import { prepareEncryptedGraphForBoot } from "./usearch-sidecar-boot.js";
 import type Database from "better-sqlite3";
 
 const KEY = randomBytes(32);
@@ -113,6 +117,26 @@ describe("encrypted-sidecar persistence (real graph)", () => {
     expect(w.size()).toBe(expected);
     w.close();
   }
+
+  it("does not restore an obsolete graph while semantic invalidation is pending", () => {
+    seedChunks(3);
+    setIndexEmbedModel(db, MODEL, EMBEDDING_DIM);
+    buildAndSaveEncrypted();
+    const encrypted = readFileSync(encPath);
+    setLexicalWrites(db, true);
+    expect(prepareEncryptedGraphForBoot(db, dir, KEY)).toEqual({
+      restored: false,
+      reason: "semantic index invalidation pending",
+    });
+    expect(existsSync(usearchPath)).toBe(false);
+    expect(readFileSync(encPath)).toEqual(encrypted);
+    expect(hasLexicalWrites(db)).toBe(true);
+    expect(db.prepare("SELECT count(*) AS n FROM chunks").get()).toEqual({ n: 3 });
+    // The guard preserves the valid ciphertext; without pending invalidation
+    // the same checkpoint remains decryptable.
+    setLexicalWrites(db, false);
+    expect(prepareEncryptedGraphForBoot(db, dir, KEY).restored).toBe(true);
+  });
 
   it("saves an encrypted sidecar whose fingerprint matches the write-seq", () => {
     seedChunks(30);

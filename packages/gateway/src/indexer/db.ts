@@ -1587,7 +1587,7 @@ export interface ChunkUpsertInput {
   documentId: string;
   chunkIndex: number;
   content: string;
-  embedding: Float32Array;
+  embedding: Float32Array | null;
   sourceId: string;
   documentType?: string;
   title: string;
@@ -1620,7 +1620,7 @@ function removeOrEnqueueVectors(
   options?: IndexWriteOptions,
 ): void {
   if (rowids.length === 0) return;
-  if (options?.usearch) {
+  if (options?.usearch && !options.usearch.isDetached) {
     options.usearch.removeBatch(rowids as bigint[]);
     return;
   }
@@ -1649,9 +1649,11 @@ export interface PendingVectorDelete {
  */
 export function preparePendingVectorDeletes(
   db: Db,
-  usearch: import("./usearch-index.js").UsearchWriteHandle,
+  usearch: import("./usearch-index.js").UsearchWriteHandle | undefined,
   limit?: number,
 ): PendingVectorDelete[] {
+  // Missing or memory-shed graphs cannot publish removals; retain their obligations.
+  if (!usearch || usearch.isDetached) return [];
   const bounded = limit === undefined ? null : Math.max(1, Math.floor(limit));
   const rows = db
     .prepare<[number | null], { chunk_rowid: number; generation: number; reused: number }>(
@@ -1732,10 +1734,10 @@ export function upsertChunks(
         author: c.author ?? null,
         tags: c.tags ? JSON.stringify(c.tags) : null,
         relevance_score: c.relevanceScore ?? null,
-        embedding: embeddingBlob(c.embedding),
+        embedding: c.embedding === null ? null : embeddingBlob(c.embedding),
       });
 
-      if (options?.usearch && getRowId) {
+      if (options?.usearch && getRowId && c.embedding) {
         const row = getRowId.get(c.documentId, c.chunkIndex);
         if (row) {
           options.usearch.add(BigInt(row.rowid), c.embedding);
@@ -1978,7 +1980,7 @@ export function deleteChunksByDocument(
     // With a usearch handle, defer the vector removal until after the txn
     // commits (usearch isn't transactional with SQLite). Without one (the
     // HTTP path), enqueue the rowids atomically with the chunk delete.
-    if (options?.usearch) {
+    if (options?.usearch && !options.usearch.isDetached) {
       usearchRowids = rowids;
     } else {
       removeOrEnqueueVectors(db, rowids, options);
@@ -2247,11 +2249,12 @@ export function listPendingSourceIndexPurges(db: Db): string[] {
 }
 
 /**
- * Remove every queued source from the SQLite/FTS index while retaining the
- * durable obligations until the worker publishes the corresponding HNSW
- * removals. The gateway runs this before opening its search snapshot or
- * listener, so a crash between enqueue and delete cannot make removed content
- * lexically searchable during model or graph startup.
+ * Remove every queued source from SQLite/FTS while retaining its SQL re-apply
+ * obligation until the sole writer drains any stale in-flight writes. Vector
+ * removals are independently journaled in pending_vector_deletes until an
+ * actual graph save publishes them. The gateway runs this before opening its
+ * search snapshot or listener, so a crash between enqueue and delete cannot
+ * make removed content lexically searchable during model or graph startup.
  */
 export function scrubPendingSourceIndexPurges(db: Db): {
   sourceIds: string[];
@@ -2268,7 +2271,11 @@ export function scrubPendingSourceIndexPurges(db: Db): {
   return { sourceIds, deletedDocuments };
 }
 
-/** Clear only obligations whose delete and graph publication both succeeded. */
+/**
+ * Complete SQL re-apply after the source rows are gone and no stale in-flight
+ * write can restore them. Semantic owners save their graph first; lexical
+ * owners retain graph obligations in the independent vector-delete journal.
+ */
 export function completeSourceIndexPurges(db: Db, sourceIds: readonly string[]): void {
   if (sourceIds.length === 0) return;
   db.prepare(
@@ -2653,4 +2660,20 @@ export function refreshIndexStats(db: Db): void {
     ).run(totalIndexed, totalChunks, now);
   });
   tx();
+}
+
+/** Durable evidence that semantic invalidation is required or interrupted. */
+export function hasLexicalWrites(db: Db): boolean {
+  return db.prepare("SELECT 1 FROM index_meta WHERE key = 'lexical_writes'").get() != null;
+}
+
+/** Set before lexical writes or invalidation; clear after SQL and obsolete graph removal succeed. */
+export function setLexicalWrites(db: Db, pending: boolean): void {
+  if (pending) {
+    db.prepare(
+      "INSERT OR REPLACE INTO index_meta (key, value, updated_at) VALUES ('lexical_writes', '1', ?)",
+    ).run(new Date().toISOString());
+  } else {
+    db.exec("DELETE FROM index_meta WHERE key = 'lexical_writes'");
+  }
 }
