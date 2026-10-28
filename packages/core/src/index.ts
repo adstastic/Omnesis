@@ -1168,6 +1168,8 @@ export type {
   BackendType,
   HttpBackendConfig,
   AgentProtocol,
+  TranscriptionProtocol,
+  TranscriptionBackendOptions,
   AssignmentValue,
   ResolvedAssignment,
   ResolvedLocal,
