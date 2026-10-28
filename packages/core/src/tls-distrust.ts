@@ -40,9 +40,9 @@ export function isDistrustedRoot(pem: string): boolean {
   return DISTRUSTED_ROOT_SHA256.has(createHash("sha256").update(der).digest("hex"));
 }
 
-/** Node's bundled public roots without the distrusted ones. */
-export function publicRoots(): string[] {
-  return tls.getCACertificates("bundled").filter((pem) => !isDistrustedRoot(pem));
+/** Node's bundled public roots (or `bundled`) without the distrusted ones. */
+export function publicRoots(bundled = tls.getCACertificates("bundled")): string[] {
+  return bundled.filter((pem) => !isDistrustedRoot(pem));
 }
 
 /**

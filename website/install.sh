@@ -1018,10 +1018,13 @@ EOF
 # 0700) in the installer's own shell, so cleanup_temp_files removes it; this
 # covers a call before that.
 with_npm_trust() {
-  : "${NPM_TRUST_DIR:=$(mktemp -d)}"
+  [ -n "${NPM_TRUST_DIR:-}" ] || NPM_TRUST_DIR="$(mktemp -d)" ||
+    fail "Could not create a private temporary directory for npm's certificate filter."
   NPM_TRUST_PRELOAD="$NPM_TRUST_DIR/distrust-roots.mjs"
   [ -f "$NPM_TRUST_PRELOAD" ] || npm_trust_preload >"$NPM_TRUST_PRELOAD"
-  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import=file://$NPM_TRUST_PRELOAD" "$@"
+  # NODE_OPTIONS splits on spaces, so a TMPDIR holding one goes in encoded.
+  NPM_TRUST_URL="file://$(printf '%s' "$NPM_TRUST_PRELOAD" | sed 's/%/%25/g; s/ /%20/g; s/#/%23/g; s/?/%3F/g')"
+  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import=$NPM_TRUST_URL" "$@"
 }
 
 # `npm run` reaches no registry, so a build keeps exactly the NODE_OPTIONS it
@@ -1767,7 +1770,8 @@ with_npm_trust() {
   cat >"\$NPM_TRUST_DIR/distrust-roots.mjs" <<'NPM_TRUST_EOF'
 $(npm_trust_preload)
 NPM_TRUST_EOF
-  NODE_OPTIONS="\${NODE_OPTIONS:+\$NODE_OPTIONS }--import=file://\$NPM_TRUST_DIR/distrust-roots.mjs" "\$@"
+  NPM_TRUST_URL="file://\$(printf '%s' "\$NPM_TRUST_DIR/distrust-roots.mjs" | sed 's/%/%25/g; s/ /%20/g; s/#/%23/g; s/?/%3F/g')"
+  NODE_OPTIONS="\${NODE_OPTIONS:+\$NODE_OPTIONS }--import=\$NPM_TRUST_URL" "\$@"
   NPM_TRUST_STATUS=\$?
   rm -rf "\$NPM_TRUST_DIR"
   return "\$NPM_TRUST_STATUS"

@@ -83,14 +83,17 @@ const distrustedInChild = (nodeOptions: string) =>
     }),
   ) as string[];
 
-/** The body the installer's `npm_trust_preload` writes. */
-function installerPreload(path: string): string {
-  const installer = readFileSync(join(repoRoot, path), "utf8");
-  const start = installer.indexOf("npm_trust_preload() {\n  cat <<'EOF'\n");
+/** The preload heredoc a script writes: the lines after `opening`, up to EOF. */
+function scriptPreload(path: string, opening: string): string {
+  const script = readFileSync(join(repoRoot, path), "utf8");
+  const start = script.indexOf(`${opening}\n`);
   expect(start).toBeGreaterThan(0);
-  const body = installer.indexOf("\n", installer.indexOf("<<'EOF'", start)) + 1;
-  return installer.slice(body, installer.indexOf("EOF\n}\n", body));
+  const body = start + opening.length + 1;
+  return script.slice(body, script.indexOf("\nEOF\n", body) + 1);
 }
+
+const INSTALLER_PRELOAD = "npm_trust_preload() {\n  cat <<'EOF'";
+const HARDENED_PRELOAD = `  cat > "$BUILD_DIR/distrust-roots.mjs" <<'EOF'`;
 
 describe("distrusted roots", () => {
   it("are the three emSign roots, matched from their PEM encoding", () => {
@@ -121,7 +124,8 @@ describe("distrusted roots", () => {
     try {
       setDefaultCACertificates([...original, ...EMSIGN_ROOTS]);
       distrustCompromisedRoots();
-      expect(getCACertificates("default").map(sha256)).toEqual(original.map(sha256));
+      // setDefaultCACertificates does not keep its input's order.
+      expect(getCACertificates("default").map(sha256).sort()).toEqual(original.map(sha256).sort());
     } finally {
       setDefaultCACertificates(original);
     }
@@ -134,20 +138,27 @@ describe("distrusted roots", () => {
     expect(roots).toEqual(bundled.filter((pem) => !DISTRUSTED_ROOT_SHA256.has(sha256(pem))));
   });
 
+  it("are left out of public roots built from a set that holds them", () => {
+    const bundled = getCACertificates("bundled");
+    expect(publicRoots([...bundled, ...EMSIGN_ROOTS])).toEqual(publicRoots(bundled));
+    expect(publicRoots(EMSIGN_ROOTS)).toEqual([]);
+  });
+
   it("are dropped by the core barrel before any other module it loads", () => {
     const barrel = readFileSync(join(repoRoot, "packages/core/src/index.ts"), "utf8");
     const firstStatement = barrel.split("\n").find((line) => /^(?:import|export)\b/u.test(line));
     expect(firstStatement).toBe('import "./tls-distrust.js";');
   });
 
-  it.each(["packages/agent-integration/src/trust.ts", "scripts/install.sh"])(
-    "are restated exactly by %s",
-    (path) => {
-      expect(fingerprintsIn(path)).toEqual(new Set(DISTRUSTED_ROOT_SHA256));
-    },
-  );
+  it.each([
+    "packages/agent-integration/src/trust.ts",
+    "scripts/install.sh",
+    "scripts/hardened-gateway.sh",
+  ])("are restated exactly by %s", (path) => {
+    expect(fingerprintsIn(path)).toEqual(new Set(DISTRUSTED_ROOT_SHA256));
+  });
 
-  it("leave every process able to load on a Node without setDefaultCACertificates", () => {
+  it("leave the core barrel able to load on a Node without setDefaultCACertificates", () => {
     // Node before 24.5, which the published engines range admits: a hook
     // serves node:tls without the export, so a static import of it fails
     // to link exactly as it does there.
@@ -175,7 +186,9 @@ registerHooks({
 });
 `,
     );
-    const moduleUrl = pathToFileURL(join(here, "tls-distrust.ts")).href;
+    // The barrel, not this module alone: any module it loads that imports the
+    // name stops every Omnesis process loading.
+    const moduleUrl = pathToFileURL(join(here, "index.ts")).href;
     const output = execFileSync(
       process.execPath,
       [
@@ -240,10 +253,12 @@ process.stdout.write(/--import=(\\S+)$/.exec(m.distrustingNodeOptions(""))[1]);`
     expect(existsSync(dirname(fileURLToPath(preload)))).toBe(false);
   });
 
-  it.each(["scripts/install.sh", "website/install.sh"])(
-    "is the preload %s writes, byte for byte",
-    (path) => {
-      expect(installerPreload(path)).toBe(PRELOAD_SOURCE);
-    },
-  );
+  it.each([
+    ["scripts/install.sh", INSTALLER_PRELOAD],
+    ["website/install.sh", INSTALLER_PRELOAD],
+    ["scripts/hardened-gateway.sh", HARDENED_PRELOAD],
+    ["website/hardened-gateway.sh", HARDENED_PRELOAD],
+  ])("is the preload %s writes, byte for byte", (path, opening) => {
+    expect(scriptPreload(path, opening)).toBe(PRELOAD_SOURCE);
+  });
 });

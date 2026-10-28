@@ -156,7 +156,8 @@ with_npm_trust() {
   NPM_TRUST_DIR="$(mktemp -d)" || return 1
   cat >"$NPM_TRUST_DIR/distrust-roots.mjs" <<'NPM_TRUST_EOF'
 ${PRELOAD_SOURCE}NPM_TRUST_EOF
-  NODE_OPTIONS="\${NODE_OPTIONS:+$NODE_OPTIONS }--import=file://$NPM_TRUST_DIR/distrust-roots.mjs" "$@"
+  NPM_TRUST_URL="file://$(printf '%s' "$NPM_TRUST_DIR/distrust-roots.mjs" | sed 's/%/%25/g; s/ /%20/g; s/#/%23/g; s/?/%3F/g')"
+  NODE_OPTIONS="\${NODE_OPTIONS:+$NODE_OPTIONS }--import=$NPM_TRUST_URL" "$@"
   NPM_TRUST_STATUS=$?
   rm -rf "$NPM_TRUST_DIR"
   return "$NPM_TRUST_STATUS"

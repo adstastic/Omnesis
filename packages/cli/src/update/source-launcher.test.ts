@@ -18,7 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { once } from "node:events";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
@@ -161,21 +161,29 @@ writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1
     expect(install.match(/&& with_npm_trust npm ci \)/g)).toHaveLength(2);
     expect(install).not.toMatch(/&& npm ci/);
     expect(launcher).toContain('( cd "$1" && with_npm_trust node -e \'');
-    // The launcher's own with_npm_trust, run against a stand-in that reads
-    // the preload it is given.
+    // The launcher's own with_npm_trust, under a temporary directory whose
+    // path holds a space (GNU mktemp follows TMPDIR), running a real node that
+    // reads the preload back through the URL it was given.
+    const bin = mkdtempSync(join(tmpdir(), "omnesis-npm-trust-"));
+    scratch.push(bin);
+    writeFileSync(
+      join(bin, "mktemp"),
+      `#!/bin/sh\nd='${bin}/with space #1/tmp'\nmkdir -p "$d" && printf '%s\\n' "$d"\n`,
+      { mode: 0o755 },
+    );
+    const readBack =
+      'const u = process.env.NODE_OPTIONS.split("--import=").pop(); ' +
+      'process.stdout.write(process.env.NODE_OPTIONS + "\\n" + require("fs").readFileSync(new URL(u), "utf8"));';
     const start = launcher.indexOf("with_npm_trust() {");
     // Past the preload it embeds, whose own blocks also close with "}".
     const end = launcher.indexOf("\n}\n", launcher.indexOf("\nNPM_TRUST_EOF\n", start)) + 3;
     const definition = launcher.slice(start, end);
     const result = spawnSync(
       "sh",
-      [
-        "-c",
-        `${definition}\nwith_npm_trust sh -c 'printf "%s\\n" "$NODE_OPTIONS"; cat "\${NODE_OPTIONS##*file://}"'`,
-      ],
+      ["-c", `${definition}\nwith_npm_trust "${process.execPath}" -e '${readBack}'`],
       {
         encoding: "utf8",
-        env: { PATH: process.env.PATH, NODE_OPTIONS: "--max-old-space-size=512" },
+        env: { PATH: `${bin}:${process.env.PATH ?? ""}`, NODE_OPTIONS: "--max-old-space-size=512" },
       },
     );
     expect(result.status, result.stderr).toBe(0);
@@ -184,7 +192,7 @@ writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1
       /^--max-old-space-size=512 --import=file:\/\/\S+\/distrust-roots\.mjs$/u,
     );
     expect(body.join("\n")).toBe(PRELOAD_SOURCE);
-    expect(existsSync(options.replace(/^.*--import=file:\/\//u, ""))).toBe(false);
+    expect(existsSync(fileURLToPath(options.replace(/^.*--import=/u, "")))).toBe(false);
   });
 
   test("stays byte-identical to the toolchain-free installer's renderer", () => {

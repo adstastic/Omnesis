@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Adrien Conrath
 
-import {
-  connect as tlsConnect,
-  getCACertificates,
-  setDefaultCACertificates,
-  type ConnectionOptions,
-} from "node:tls";
+// setDefaultCACertificates is read off the module, not imported by name: Node
+// before 24.5, which the published engines range admits, lacks it, and a named
+// import would stop the @omnesis/core barrel loading at all there.
+import tls, { connect as tlsConnect, getCACertificates, type ConnectionOptions } from "node:tls";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -271,7 +269,12 @@ export function applyCaTrustInProcess(certPath: string): void {
   if (!certs || certs.length === 0) {
     throw new Error(`No PEM certificates found in ${certPath}`);
   }
-  setDefaultCACertificates([...getCACertificates("default"), ...certs]);
+  if (typeof tls.setDefaultCACertificates !== "function") {
+    throw new Error(
+      `Trusting ${certPath} in this process needs Node.js 24.5 or later; this is ${process.version}`,
+    );
+  }
+  tls.setDefaultCACertificates([...getCACertificates("default"), ...certs]);
   appliedCaPaths.set(certPath, contentHash);
   log.debug(`Added ${certs.length} certificate(s) from ${certPath} to the process CA store`);
 }

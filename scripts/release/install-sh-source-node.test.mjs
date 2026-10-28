@@ -88,14 +88,21 @@ function run(
   );
   if (manager === "apt") executable(join(bin, "apt-get"), "#!/bin/sh\nexit 99\n");
   if (nodesourceCleans) {
-    for (const tool of ["mktemp", "cat", "rm"]) {
+    for (const tool of ["cat", "mkdir", "rm", "sed"]) {
       const path = spawnSync("/bin/sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout;
       symlinkSync(path.trim(), join(bin, tool));
     }
-    // A stand-in npm that records whether the preload it is given exists.
+    // A mktemp whose directories hold a space, as GNU mktemp gives under such a
+    // TMPDIR: NODE_OPTIONS splits on spaces, so the preload URL must not.
+    executable(
+      join(bin, "mktemp"),
+      `#!/bin/sh\nn=$(cat '${dir}/mktemp-n' 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > '${dir}/mktemp-n'\nd='${dir}/tmp with space #'"$n"\nmkdir "$d" && printf '%s\\n' "$d"\n`,
+    );
+    // A stand-in npm that records whether the preload URL it is given is one
+    // NODE_OPTIONS keeps whole and names a file that exists.
     executable(
       join(bin, "npm"),
-      `#!/bin/sh\nif [ -f "\${NODE_OPTIONS##*file://}" ]; then echo "npm preload ok" >> '${calls}'; else echo "npm preload missing" >> '${calls}'; fi\n`,
+      `#!/bin/sh\npreload=$(printf '%s' "\${NODE_OPTIONS##*--import=file://}" | sed 's/%20/ /g; s/%23/#/g; s/%3F/?/g; s/%25/%/g')\ncase "\${NODE_OPTIONS##*--import=}" in *" "*) preload=; esac\nif [ -f "$preload" ]; then echo "npm preload ok" >> '${calls}'; else echo "npm preload missing" >> '${calls}'; fi\n`,
     );
   }
   if (manager === "dnf")
